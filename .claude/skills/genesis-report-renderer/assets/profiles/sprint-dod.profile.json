@@ -1,0 +1,13 @@
+{
+  "agent_id": "sprint-dod",
+  "title": "Sprint DoD · {meta.scope.label}",
+  "layout": {
+    "main": ["criteria", "issue-table"],
+    "aside": ["distribution", "@actions", "@sources"]
+  },
+  "action_groups": {
+    "manual": "Verificación manual",
+    "fix": "Correcciones detectadas por el agente",
+    "practice": "Buenas prácticas (opcional)"
+  }
+}

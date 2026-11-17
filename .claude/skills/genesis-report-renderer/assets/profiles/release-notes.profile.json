@@ -1,0 +1,12 @@
+{
+  "agent_id": "release-notes",
+  "title": "Release Notes review · {meta.scope.label}",
+  "layout": {
+    "main": ["doc-score", "criteria", "set-diff", "issue-table"],
+    "aside": ["key-value", "metric-gate", "@actions", "@sources"]
+  },
+  "action_groups": {
+    "manual": "Verificación manual",
+    "fix": "Correcciones"
+  }
+}

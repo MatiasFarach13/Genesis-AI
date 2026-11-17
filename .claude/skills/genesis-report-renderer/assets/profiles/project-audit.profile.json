@@ -1,0 +1,12 @@
+{
+  "agent_id": "project-audit",
+  "title": "Project Audit · {meta.scope.label}",
+  "layout": {
+    "main": ["metric-gate", "criteria", "deliverables", "coverage-matrix", "issue-table", "set-diff"],
+    "aside": ["distribution", "key-value", "@actions", "@sources"]
+  },
+  "action_groups": {
+    "manual": "Verificación manual",
+    "fix": "Correcciones"
+  }
+}

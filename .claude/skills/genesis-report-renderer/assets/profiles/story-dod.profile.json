@@ -1,0 +1,20 @@
+{
+  "agent_id": "story-dod",
+  "title": "Story DoD · {meta.scope.label}",
+  "layout": {
+    "main": ["key-value", "criteria", "generic-table", "issue-table"],
+    "aside": ["distribution", "@actions", "@sources"]
+  },
+  "action_groups": {
+    "en": {
+      "fix": "Action Items & Jira Corrections",
+      "manual": "Manual Verifications",
+      "practice": "Engineering Best Practices"
+    },
+    "es": {
+      "fix": "Correcciones requeridas en Jira",
+      "manual": "Verificaciones manuales",
+      "practice": "Buenas prácticas de ingeniería"
+    }
+  }
+}
