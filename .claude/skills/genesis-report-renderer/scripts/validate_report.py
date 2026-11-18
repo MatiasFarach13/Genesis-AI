@@ -151,6 +151,8 @@ def _validate_section(sec: dict, path: str, f: Findings) -> None:
             if not isinstance(row.get("key"), str) or not row["key"]:
                 f.error(f"{p}.key", "required string")
             _check_status(row.get("status_category"), f"{p}.status_category", f, ITEM_STATUSES, required=False)
+            if "resolution" in row and row["resolution"] is not None and not isinstance(row["resolution"], str):
+                f.error(f"{p}.resolution", "must be a string or null")
     elif stype == "distribution":
         for p, item in _list_of_objects(sec, "items", path, f):
             if not isinstance(item.get("label"), str):

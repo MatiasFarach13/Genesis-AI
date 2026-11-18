@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_clock  # noqa: E402
 from validate_report import configure_stdout, load_json, normalize, validate  # noqa: E402
 
-RENDERER_VERSION = "1.1.0"
+RENDERER_VERSION = "1.2.0"
 SKILL_DIR = Path(__file__).resolve().parent.parent
 ASSETS = SKILL_DIR / "assets"
 PLACEHOLDER = re.compile(r"/\*__(STYLES|DATA|PROFILE|RENDERER)__\*/|__(TITLE|LANG|VERSION)__")

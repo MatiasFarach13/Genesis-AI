@@ -1016,7 +1016,8 @@ def evaluate_single_story(
     summary = str(fields.get("summary") or "")
     status_name = str((fields.get("status") or {}).get("name") or "Unknown")
     resolution_obj = fields.get("resolution")
-    resolution_name = str(resolution_obj.get("name") if isinstance(resolution_obj, dict) else "Unresolved")
+    default_unresolved = "Sin resolución" if lang == "es" else "Unresolved"
+    resolution_name = str(resolution_obj.get("name") if isinstance(resolution_obj, dict) and resolution_obj.get("name") else default_unresolved)
     assignee_obj = fields.get("assignee")
     assignee_name = str(assignee_obj.get("displayName") if isinstance(assignee_obj, dict) else "Unassigned")
     issue_type = str((fields.get("issuetype") or {}).get("name") or "Story")
@@ -1156,7 +1157,7 @@ def evaluate_single_story(
             f"{pr_count} Bitbucket Pull Request(s) linked to {key}."
         )
         checks_1 = [
-            (f"Se encontraron {pr_count} PR(s) en dev-status de Jira: " if lang == "es" else f"Found {pr_count} PR(s) in Jira dev-status: ")
+            (f"Se encontraron {pr_count} Pull Request(s) vinculados en Jira: " if lang == "es" else f"Found {pr_count} linked Pull Request(s) in Jira: ")
             + "; ".join(pr_summaries)
         ]
         criteria_items.append({
@@ -1176,9 +1177,9 @@ def evaluate_single_story(
             f"Pull Request summary present in Development field for {key}."
         )
         checks_1 = [
-            "Enlace de PR confirmado mediante el resumen de customfield_10000 Development."
+            "Enlace de Pull Request confirmado mediante el campo Development de Jira."
             if lang == "es" else
-            "Confirmed PR link via customfield_10000 Development summary."
+            "Confirmed Pull Request link via Jira Development field."
         ]
         criteria_items.append({
             "id": "1",
@@ -1196,9 +1197,9 @@ def evaluate_single_story(
             f"No Bitbucket Pull Requests linked to {key}."
         )
         checks_1 = [
-            f"Consultados dev-status y customfield_10000 para {key}: 0 Pull Requests encontrados."
+            f"Se consultaron los registros de integración con Bitbucket en Jira para {key}: no se encontraron Pull Requests."
             if lang == "es" else
-            f"Queried Jira dev-status and customfield_10000 for {key}: 0 Pull Requests found."
+            f"Checked Jira Bitbucket integration and Development data for {key}: 0 Pull Requests found."
         ]
         criteria_items.append({
             "id": "1",
@@ -1223,26 +1224,27 @@ def evaluate_single_story(
         })
 
     # Analyze approvals and merge states across PRs
+    has_cf_prs = "pullrequest" in cf_10000 and "stateCount=" in cf_10000 and "stateCount=0" not in cf_10000
+    has_any_pr = pr_count > 0 or has_cf_prs
     open_prs = [p for p in prs if str(p.get("status", "")).upper() == "OPEN"]
     merged_prs = [p for p in prs if str(p.get("status", "")).upper() == "MERGED"]
 
     pr_approval_checks: List[str] = []
     pr_approval_failures: List[str] = []
-    all_prs_properly_approved = len(merged_prs) > 0 and len(open_prs) == 0
 
     for p in prs:
         pr_id = p.get("id", "?")
         pr_status = str(p.get("status", "")).upper()
         if pr_status == "DECLINED" and len(merged_prs) > 0:
             declined_msg = (
-                f"PR #{pr_id} está DECLINADO (ignorado dado que existen PRs mergeados)."
+                f"PR #{pr_id}: declinado (no bloqueante porque la historia cuenta con PR mergeado)."
                 if lang == "es" else
-                f"PR #{pr_id} is DECLINED (ignored since merged PRs exist)."
+                f"PR #{pr_id}: declined (non-blocking since the story has a merged PR)."
             )
             pr_approval_checks.append(declined_msg)
             continue
         repo_name = str(p.get("repositoryName") or "")
-        author_name = str((p.get("author") or {}).get("name") or "Unknown")
+        author_name = str((p.get("author") or {}).get("name") or ("Desconocido" if lang == "es" else "Unknown"))
         is_unity = "unity" in repo_name.lower() or "[unity]" in summary.lower()
         req_approvals = 2 if is_unity else 1
 
@@ -1253,33 +1255,38 @@ def evaluate_single_story(
                 if not is_same_person(rev_name, author_name):
                     approvers.append(rev_name)
 
-        if len(approvers) >= req_approvals:
+        if len(approvers) >= req_approvals and pr_status != "DECLINED":
             msg_ok = (
                 f"PR #{pr_id} ({repo_name or 'Bitbucket'}, autor: {author_name}): "
-                f"{len(approvers)}/{req_approvals} aprobación(es) requerida(s) cumplida(s) ({', '.join(approvers)})."
+                f"aprobado por {', '.join(approvers)} ({len(approvers)}/{req_approvals} aprobaciones requeridas)."
                 if lang == "es" else
                 f"PR #{pr_id} ({repo_name or 'Bitbucket'}, author: {author_name}): "
-                f"{len(approvers)}/{req_approvals} required approval(s) met ({', '.join(approvers)})."
+                f"approved by {', '.join(approvers)} ({len(approvers)}/{req_approvals} required approvals)."
             )
             pr_approval_checks.append(msg_ok)
         else:
-            all_prs_properly_approved = False
             msg_fail = (
-                f"PR #{pr_id} ({repo_name or 'Bitbucket'}, autor: {author_name}) tiene {len(approvers)}/{req_approvals} "
-                f"aprobación(es) válida(s) de no-autor."
+                f"PR #{pr_id} ({repo_name or 'Bitbucket'}, autor: {author_name}, estado: {pr_status}): "
+                f"registra {len(approvers)} de {req_approvals} aprobación(es) requerida(s) de revisores distintos al autor."
                 if lang == "es" else
-                f"PR #{pr_id} ({repo_name or 'Bitbucket'}, author: {author_name}) has {len(approvers)}/{req_approvals} "
-                f"valid non-author approval(s)."
+                f"PR #{pr_id} ({repo_name or 'Bitbucket'}, author: {author_name}, status: {pr_status}): "
+                f"has {len(approvers)} of {req_approvals} required non-author approval(s)."
             )
             pr_approval_failures.append(msg_fail)
+
+    all_prs_properly_approved = (
+        pr_count > 0
+        and (len(merged_prs) > 0 or len(open_prs) > 0)
+        and len(pr_approval_failures) == 0
+    )
 
     # Item 2: Code review evidence linked (bitbucket PRs linked)
     spec_2 = CRITERIA_SPECS["2"][lang]
     if pr_count > 0 and all_prs_properly_approved:
         note_2 = (
-            "Evidencia de code review verificada mediante PR(s) aprobado(s) de Bitbucket."
+            "Evidencia de code review verificada mediante Pull Request(s) aprobado(s) en Bitbucket."
             if lang == "es" else
-            "Code review evidence verified via approved Bitbucket PR(s)."
+            "Code review evidence verified via approved Bitbucket Pull Request(s)."
         )
         criteria_items.append({
             "id": "2",
@@ -1292,15 +1299,19 @@ def evaluate_single_story(
         })
     else:
         note_2 = (
-            "Falta evidencia de PRs aprobados para el code review."
+            "Falta evidencia de Pull Requests aprobados para dar por completado el code review."
             if lang == "es" else
-            "Missing approved PR evidence for code review."
+            "Missing approved Pull Request evidence to confirm code review completion."
         )
-        checks_2_default = [
-            "No hay Pull Requests vinculados para verificar el code review."
+        no_approved_msg_2 = (
+            "No hay Pull Requests aprobados para verificar el code review."
             if lang == "es" else
-            "No Pull Requests linked to verify code review."
-        ]
+            "No approved Pull Requests to verify code review."
+        )
+        if prs:
+            checks_2 = ([no_approved_msg_2] if not pr_approval_checks else []) + pr_approval_checks + pr_approval_failures
+        else:
+            checks_2 = [no_approved_msg_2]
         criteria_items.append({
             "id": "2",
             "group": spec_2["group"],
@@ -1308,7 +1319,7 @@ def evaluate_single_story(
             "description": spec_2["description"],
             "status": "fail",
             "note": note_2,
-            "checks": pr_approval_checks + pr_approval_failures if prs else checks_2_default,
+            "checks": checks_2,
             "issues": [key],
         })
 
@@ -1317,20 +1328,20 @@ def evaluate_single_story(
     total_comments = sum(int(p.get("commentCount") or 0) for p in prs)
     if pr_count > 0 and len(merged_prs) > 0 and len(open_prs) == 0 and all_prs_properly_approved:
         note_3 = (
-            f"Cumplido: todos los PR(s) mergeados fueron aprobados por revisores ({total_comments} comentario(s) de PR registrados)."
+            f"Cumplido: todos los Pull Requests integrados fueron aprobados por sus revisores ({total_comments} comentario(s) registrados en la revisión)."
             if lang == "es" else
-            f"Fulfilled: all merged PR(s) were approved by reviewers ({total_comments} total PR comment(s) recorded)."
+            f"Fulfilled: all merged Pull Requests were approved by reviewers ({total_comments} review comment(s) recorded)."
         )
         checks_3 = [
             (
-                f"Todos los PRs activos están MERGED y aprobados por los revisores requeridos ({total_comments} comentario(s) en PRs)."
+                f"Todos los Pull Requests activos fueron integrados (MERGED) y aprobados ({total_comments} comentario(s) revisados)."
                 if lang == "es" else
-                f"All active PRs are MERGED and approved by required reviewers ({total_comments} comment(s) across PRs)."
+                f"All active Pull Requests are MERGED and approved by required reviewers ({total_comments} comment(s) across PRs)."
             ),
             (
-                "Por convención del equipo, la aprobación del revisor y merge confirma que las observaciones fueron atendidas."
+                "Por acuerdo del equipo, la aprobación de los revisores y el merge confirman que las observaciones fueron resueltas."
                 if lang == "es" else
-                "Per convention, reviewer approval + merge confirms observations were addressed."
+                "Per team agreement, reviewer approval and merge confirm that review observations were resolved."
             ),
         ]
         criteria_items.append({
@@ -1344,15 +1355,34 @@ def evaluate_single_story(
         })
     else:
         note_3 = (
-            "No se puede confirmar la resolución de observaciones de revisión hasta que todos los PRs estén aprobados y mergeados."
+            "No se puede dar por cerrado el seguimiento de observaciones hasta que todos los Pull Requests estén aprobados y mergeados."
             if lang == "es" else
-            "Cannot confirm review observations resolution until all PRs are approved and merged."
+            "Review observations cannot be confirmed resolved until all Pull Requests are approved and merged."
         )
-        checks_3 = [
-            "Los PRs no existen, aún están OPEN o carecen de las aprobaciones requeridas."
-            if lang == "es" else
-            "PRs are either missing, still OPEN, or lacking required reviewer approvals."
-        ]
+        if not has_any_pr:
+            checks_3 = [
+                "No hay Pull Requests aprobados y mergeados asociados a la historia para verificar el cierre de observaciones."
+                if lang == "es" else
+                "No approved and merged Pull Requests found on the story to verify observation resolution."
+            ]
+        elif open_prs and pr_approval_failures:
+            checks_3 = [
+                f"Existen {len(open_prs)} Pull Request(s) aún abiertos y pendientes de completar las aprobaciones requeridas."
+                if lang == "es" else
+                f"There are {len(open_prs)} open Pull Request(s) still awaiting required reviewer approvals."
+            ]
+        elif open_prs:
+            checks_3 = [
+                f"Aunque los revisores ya aprobaron, aún quedan {len(open_prs)} Pull Request(s) en estado OPEN pendientes de merge."
+                if lang == "es" else
+                f"Although approved by reviewers, {len(open_prs)} Pull Request(s) remain OPEN awaiting merge."
+            ]
+        else:
+            checks_3 = [
+                "Faltan las aprobaciones requeridas de revisores en los Pull Requests vinculados."
+                if lang == "es" else
+                "Linked Pull Requests are missing required reviewer approvals."
+            ]
         criteria_items.append({
             "id": "3",
             "group": spec_3["group"],
@@ -1369,15 +1399,15 @@ def evaluate_single_story(
     if pr_count > 0 and len(merged_prs) > 0 and len(open_prs) == 0:
         dest_branches = sorted({str((p.get("destination") or {}).get("branch") or "master") for p in merged_prs})
         note_4 = (
-            f"{len(merged_prs)} PR(s) mergeado(s) en {', '.join(dest_branches)}; 0 PRs abiertos."
+            f"{len(merged_prs)} Pull Request(s) integrados en {', '.join(dest_branches)}; sin Pull Requests abiertos."
             if lang == "es" else
-            f"{len(merged_prs)} PR(s) merged into {', '.join(dest_branches)}; 0 open PRs."
+            f"{len(merged_prs)} Pull Request(s) merged into {', '.join(dest_branches)}; 0 open PRs."
         )
         checks_4 = [
             (
-                f"PR #{p.get('id')} mergeado en {(p.get('destination') or {}).get('branch', 'master')}."
+                f"PR #{p.get('id')} ({p.get('repositoryName') or 'Bitbucket'}) integrado (MERGED) en la rama {(p.get('destination') or {}).get('branch', 'master')}."
                 if lang == "es" else
-                f"PR #{p.get('id')} merged into {(p.get('destination') or {}).get('branch', 'master')}."
+                f"PR #{p.get('id')} ({p.get('repositoryName') or 'Bitbucket'}) merged into branch {(p.get('destination') or {}).get('branch', 'master')}."
             )
             for p in merged_prs
         ]
@@ -1392,13 +1422,21 @@ def evaluate_single_story(
         })
     else:
         if lang == "es":
-            reason_note = f"{len(open_prs)} PR(s) aún ABIERTO(S)." if open_prs else "No se encontraron Pull Requests mergeados."
+            reason_note = f"Hay {len(open_prs)} Pull Request(s) todavía en estado abierto (OPEN)." if open_prs else "No se encontraron Pull Requests integrados (MERGED) en la rama principal."
         else:
-            reason_note = f"{len(open_prs)} PR(s) still OPEN." if open_prs else "No merged Pull Requests found."
+            reason_note = f"{len(open_prs)} Pull Request(s) are still OPEN." if open_prs else "No merged Pull Requests found."
         checks_4_prs = [
-            (f"PR #{p.get('id')}: estado={p.get('status')}" if lang == "es" else f"PR #{p.get('id')}: status={p.get('status')}")
+            (
+                f"PR #{p.get('id')} ({p.get('repositoryName') or 'Bitbucket'}): estado actual {p.get('status')}."
+                if lang == "es" else
+                f"PR #{p.get('id')} ({p.get('repositoryName') or 'Bitbucket'}): current status {p.get('status')}."
+            )
             for p in prs
-        ] or (["0 PRs encontrados."] if lang == "es" else ["0 PRs found."])
+        ] or (
+            ["No hay Pull Requests integrados (MERGED) registrados para esta historia."]
+            if lang == "es" else
+            ["No merged Pull Requests recorded for this story."]
+        )
         criteria_items.append({
             "id": "4",
             "group": spec_4["group"],
@@ -1411,9 +1449,9 @@ def evaluate_single_story(
         })
         if open_prs:
             act_text_4 = (
-                f"Mergear o declinar los {len(open_prs)} Pull Request(s) abiertos vinculados a {key}."
+                f"Integrar (merge) o cerrar los Pull Requests abiertos vinculados a {key}."
                 if lang == "es" else
-                f"Merge or decline the {len(open_prs)} open Pull Request(s) linked to {key}."
+                f"Merge or decline the open Pull Requests linked to {key}."
             )
             actions.append({
                 "group": "fix",
@@ -1426,9 +1464,9 @@ def evaluate_single_story(
     spec_5 = CRITERIA_SPECS["5"][lang]
     if pr_count > 0 and all_prs_properly_approved:
         note_5 = (
-            "Todos los PRs cumplen los requisitos de aprobación por revisores distintos al autor."
+            "Todos los Pull Requests cumplen con la cantidad de aprobadores requeridos distintos al autor."
             if lang == "es" else
-            "All PRs meet repository-specific non-author approval requirements."
+            "All Pull Requests meet repository-specific non-author approval requirements."
         )
         criteria_items.append({
             "id": "5",
@@ -1441,9 +1479,19 @@ def evaluate_single_story(
         })
     else:
         note_5 = (
-            ("; ".join(pr_approval_failures) if pr_approval_failures else ("No se encontraron PRs aprobados." if lang == "es" else "No approved PRs found."))
+            "; ".join(pr_approval_failures)
+            if pr_approval_failures
+            else ("No hay Pull Requests aprobados por los revisores requeridos." if lang == "es" else "No Pull Requests approved by required reviewers.")
         )
-        checks_5 = pr_approval_checks + pr_approval_failures if prs else (["No hay PRs vinculados."] if lang == "es" else ["No PRs linked."])
+        no_approved_msg_5 = (
+            "No hay Pull Requests aprobados por los revisores requeridos."
+            if lang == "es" else
+            "No Pull Requests approved by required reviewers."
+        )
+        if prs:
+            checks_5 = ([no_approved_msg_5] if not pr_approval_checks else []) + pr_approval_checks + pr_approval_failures
+        else:
+            checks_5 = [no_approved_msg_5]
         criteria_items.append({
             "id": "5",
             "group": spec_5["group"],
@@ -1454,11 +1502,11 @@ def evaluate_single_story(
             "checks": checks_5,
             "issues": [key],
         })
-        if pr_approval_failures:
+        if pr_approval_failures or has_any_pr:
             act_text_5 = (
-                f"Asegurar que todos los PRs de {key} cumplan las reglas de aprobación (2 aprobadores no autores para repo unity, 1 para otros)."
+                f"Completar las aprobaciones de code review requeridas en los Pull Requests de {key} (2 revisores distintos al autor para el repositorio unity, 1 para el resto)."
                 if lang == "es" else
-                f"Ensure all PRs on {key} meet reviewer approval rules (2 non-author approvers for unity repo, 1 for others)."
+                f"Complete required reviewer approvals on the Pull Requests of {key} (2 non-author approvers for unity repo, 1 for others)."
             )
             actions.append({
                 "group": "fix",
@@ -1592,9 +1640,9 @@ def evaluate_single_story(
         )
         checks_7 = [
             (
-                "Verificados customfield_10086 (Design), remote links, descripción y comentarios: no se encontró URL de Figma."
+                "Se revisaron el campo Design, enlaces externos, descripción y comentarios: no se encontró URL de Figma."
                 if lang == "es" else
-                "Checked customfield_10086 (Design), remote links, description, and comments: no Figma URL found."
+                "Checked the Design field, remote links, description, and comments: no Figma URL found."
             ),
             (
                 "No se encontró declaración de 'No Figma Required' / 'No Design Required'."
@@ -1628,12 +1676,12 @@ def evaluate_single_story(
     spec_8 = CRITERIA_SPECS["8"][lang]
     if no_figma_declared and not figma_urls:
         note_8 = (
-            "No aplica (no se requiere diseño de interfaz para esta historia)."
+            "No aplica (esta historia no requiere cambios de diseño de interfaz)."
             if lang == "es" else
-            "Not applicable (no UI design required for this story)."
+            "Not applicable (no UI design changes required for this story)."
         )
         checks_8 = [
-            "La historia no involucra cambios de diseño de UI."
+            "La historia no involucra cambios de interfaz gráfica."
             if lang == "es" else
             "Story does not involve UI design changes."
         ]
@@ -1647,16 +1695,26 @@ def evaluate_single_story(
             "checks": checks_8,
         })
     else:
+        ux_subtasks = [
+            st for st in subtasks
+            if any(w in st["summary"].lower() for w in ("ux", "ui/ux", "ux/ui", "uxui", "figma"))
+        ]
         note_8 = (
-            "Figma no expone una bandera automatizada de aprobación de línea base en Jira; confirmar verificación de UI contra línea base."
+            "Requiere confirmación visual de UX/QA para validar que la interfaz implementada coincide con el diseño aprobado en Figma."
             if lang == "es" else
-            "Figma does not expose an automated baseline approval flag via Jira; confirm UI verification against baseline."
+            "Requires visual UX/QA confirmation that the implemented UI matches the approved Figma baseline."
         )
         checks_8 = [
-            "Control manual de QA/UX requerido para confirmar que la UI implementada coincide con la línea base aprobada de Figma."
+            "Confirmar visualmente con el equipo de UX/QA que la pantalla implementada respeta la última versión aprobada en Figma."
             if lang == "es" else
-            "Manual QA/UX check required to confirm implemented UI matches the approved Figma baseline."
+            "Confirm visually with UX/QA that the implemented screen matches the latest approved Figma design."
         ]
+        for ux_st in ux_subtasks:
+            checks_8.append(
+                f"Subtarea de UX registrada en la historia: {ux_st['key']} — {ux_st['summary']} (estado: {ux_st['status']})."
+                if lang == "es" else
+                f"UX sub-task recorded on the story: {ux_st['key']} — {ux_st['summary']} (status: {ux_st['status']})."
+            )
         criteria_items.append({
             "id": "8",
             "group": spec_8["group"],
@@ -1669,9 +1727,9 @@ def evaluate_single_story(
             "issues": [key],
         })
         act_text_8 = (
-            f"Verificar que la UI implementada para {key} coincida con la última línea base aprobada en Figma."
+            f"Confirmar que la interfaz implementada para {key} coincida con la última línea base aprobada en Figma."
             if lang == "es" else
-            f"Verify that the implemented UI for {key} matches the latest approved Figma baseline."
+            f"Confirm that the implemented UI for {key} matches the latest approved Figma baseline."
         )
         actions.append({
             "group": "manual",
@@ -1689,15 +1747,15 @@ def evaluate_single_story(
     covered_acs = [c for c in ac_coverage if c["covered"]]
     if ac_items and zephyr_tcs and len(covered_acs) == len(ac_items):
         note_9 = (
-            f"Todos los {len(ac_items)} Criterio(s) de Aceptación extraídos coinciden con casos de prueba de Zephyr."
+            f"Los {len(ac_items)} Criterios de Aceptación de la historia están cubiertos por casos de prueba en Zephyr."
             if lang == "es" else
-            f"All {len(ac_items)} Acceptance Criteria item(s) extracted and matched to Zephyr test cases."
+            f"All {len(ac_items)} Acceptance Criteria items are covered by Zephyr test cases."
         )
         checks_9 = [
             (
-                f"{c['ac_id']} cubierto por {', '.join(c['matched_tcs'])}: {c['ac_text'][:90]}"
+                f"{c['ac_id']} verificado por {', '.join(c['matched_tcs'])}: {c['ac_text'][:90]}"
                 if lang == "es" else
-                f"{c['ac_id']} covered by {', '.join(c['matched_tcs'])}: {c['ac_text'][:90]}"
+                f"{c['ac_id']} verified by {', '.join(c['matched_tcs'])}: {c['ac_text'][:90]}"
             )
             for c in ac_coverage
         ]
@@ -1712,25 +1770,25 @@ def evaluate_single_story(
         })
     elif ac_items and zephyr_tcs and len(covered_acs) > 0:
         warn_9 = (
-            f"{len(covered_acs)}/{len(ac_items)} ACs vinculados directamente por coincidencia de palabras clave"
+            f"{len(covered_acs)} de {len(ac_items)} criterios asociados de forma directa"
             if lang == "es" else
-            f"{len(covered_acs)}/{len(ac_items)} ACs directly matched by keyword"
+            f"{len(covered_acs)} of {len(ac_items)} criteria directly matched"
         )
         note_9 = (
-            f"{len(ac_items)} ACs definidos y {len(zephyr_tcs)} Caso(s) de Prueba vinculados mediante Requerimiento ({len(covered_acs)}/{len(ac_items)} emparejados heurísticamente)."
+            f"Se identificaron {len(ac_items)} Criterios de Aceptación y {len(zephyr_tcs)} Caso(s) de Prueba asociados al Requerimiento ({len(covered_acs)} de {len(ac_items)} vinculados directamente por contenido)."
             if lang == "es" else
-            f"{len(ac_items)} ACs defined and {len(zephyr_tcs)} Test Case(s) linked via Requirement ({len(covered_acs)}/{len(ac_items)} matched heuristically)."
+            f"Identified {len(ac_items)} Acceptance Criteria and {len(zephyr_tcs)} Test Case(s) on the linked Requirement ({len(covered_acs)} of {len(ac_items)} directly matched by content)."
         )
         checks_9 = [
             (
-                f"Se extrajeron {len(ac_items)} Criterios de Aceptación de la descripción."
+                f"Se identificaron {len(ac_items)} Criterios de Aceptación en la descripción de la historia."
                 if lang == "es" else
-                f"Extracted {len(ac_items)} Acceptance Criteria from Story description."
+                f"Identified {len(ac_items)} Acceptance Criteria in the Story description."
             ),
             (
-                f"Se encontraron {len(zephyr_tcs)} Caso(s) de Prueba de Zephyr en el Requerimiento vinculado."
+                f"El Requerimiento vinculado cuenta con {len(zephyr_tcs)} Caso(s) de Prueba en Zephyr."
                 if lang == "es" else
-                f"Found {len(zephyr_tcs)} Zephyr Test Case(s) on linked Requirement."
+                f"The linked Requirement has {len(zephyr_tcs)} Zephyr Test Case(s)."
             ),
         ]
         criteria_items.append({
@@ -1745,14 +1803,14 @@ def evaluate_single_story(
         })
     elif not ac_items:
         note_9 = (
-            "No se encontraron secciones ni ítems explícitos de Criterios de Aceptación en la descripción de la Story."
+            "La descripción de la historia no incluye una lista explícita de Criterios de Aceptación."
             if lang == "es" else
             "No explicit Acceptance Criteria section or items found in the Story description."
         )
         checks_9 = [
-            "Descripción analizada: no se pudo identificar una lista de Criterios de Aceptación."
+            "Se revisó la descripción de la historia en Jira y no se encontraron Criterios de Aceptación detallados."
             if lang == "es" else
-            "Parsed Story description: could not identify an Acceptance Criteria list."
+            "Reviewed the Story description in Jira and found no detailed Acceptance Criteria list."
         ]
         criteria_items.append({
             "id": "9",
@@ -1765,9 +1823,9 @@ def evaluate_single_story(
             "issues": [key],
         })
         act_text_9 = (
-            f"Agregar Criterios de Aceptación claros en la descripción de {key} y asegurar cobertura con casos de prueba."
+            f"Documentar los Criterios de Aceptación en la descripción de {key} y vincular sus casos de prueba en Zephyr."
             if lang == "es" else
-            f"Add clear Acceptance Criteria to the description of {key} and ensure test case coverage."
+            f"Document clear Acceptance Criteria in the description of {key} and link their test cases in Zephyr."
         )
         actions.append({
             "group": "fix",
@@ -1777,15 +1835,15 @@ def evaluate_single_story(
         })
     elif not zephyr.available:
         note_9 = (
-            f"Se extrajeron {len(ac_items)} ítem(s) de AC de la descripción; se requiere token de API de Zephyr para auto-verificar la cobertura."
+            f"Se identificaron {len(ac_items)} Criterios de Aceptación en la historia; requiere confirmar manualmente su cobertura en Zephyr."
             if lang == "es" else
-            f"Extracted {len(ac_items)} AC item(s) from description; Zephyr API token required to auto-verify test case coverage."
+            f"Identified {len(ac_items)} Acceptance Criteria in the story; manual confirmation of test coverage in Zephyr is required."
         )
         checks_9 = [
             (
-                f"Se encontraron {len(ac_items)} ítem(s) de AC en la descripción."
+                f"Se encontraron {len(ac_items)} Criterios de Aceptación en la descripción de la historia:"
                 if lang == "es" else
-                f"Found {len(ac_items)} AC item(s) in Story description."
+                f"Found {len(ac_items)} Acceptance Criteria in the Story description:"
             )
         ] + [f"{a['id']}: {a['text'][:100]}" for a in ac_items[:5]]
         criteria_items.append({
@@ -1812,14 +1870,14 @@ def evaluate_single_story(
         })
     else:
         note_9 = (
-            f"Se encontraron {len(ac_items)} AC(s) en la descripción, pero hay 0 Casos de Prueba vinculados al Requerimiento/Story en Zephyr."
+            f"La historia define {len(ac_items)} Criterio(s) de Aceptación, pero no hay Casos de Prueba vinculados en Zephyr."
             if lang == "es" else
-            f"Found {len(ac_items)} AC(s) in description, but 0 Test Cases are linked to the Requirement/Story in Zephyr."
+            f"Story defines {len(ac_items)} Acceptance Criteria, but 0 Test Cases are linked in Zephyr."
         )
         checks_9 = [
-            f"Se extrajeron {len(ac_items)} AC(s), pero Zephyr retornó 0 casos de prueba vinculados."
+            f"Se identificaron {len(ac_items)} Criterio(s) de Aceptación en la descripción, pero el Requerimiento y la historia no registran casos de prueba vinculados en Zephyr."
             if lang == "es" else
-            f"Extracted {len(ac_items)} AC(s), but Zephyr returned 0 linked test cases."
+            f"Identified {len(ac_items)} Acceptance Criteria in the description, but the Requirement and Story have 0 linked test cases in Zephyr."
         ]
         criteria_items.append({
             "id": "9",
@@ -1832,9 +1890,9 @@ def evaluate_single_story(
             "issues": [key],
         })
         act_text_9 = (
-            f"Vincular casos de prueba de Zephyr al Requerimiento de {key} cubriendo sus {len(ac_items)} Criterios de Aceptación."
+            f"Vincular en Zephyr los casos de prueba correspondientes al Requerimiento de {key} para cubrir sus Criterios de Aceptación."
             if lang == "es" else
-            f"Link Zephyr system test cases to the Requirement of {key} covering its {len(ac_items)} Acceptance Criteria."
+            f"Link the corresponding Zephyr system test cases to the Requirement of {key} to cover its Acceptance Criteria."
         )
         actions.append({
             "group": "fix",
@@ -1846,24 +1904,24 @@ def evaluate_single_story(
     # Item 10: Links kept among Requirement, Story, Tests, and Bugs (Story -> Req; Req -> TC)
     spec_10 = CRITERIA_SPECS["10"][lang]
     if linked_reqs:
-        req_keys_str = ", ".join(f"{r['key']} ({r['relation']})" for r in linked_reqs)
+        req_keys_only = ", ".join(r["key"] for r in linked_reqs)
         if zephyr_tcs or linked_tests_jira:
             tc_count = len(zephyr_tcs) + len(linked_tests_jira)
             note_10 = (
-                f"Story vinculada a Requerimiento(s) {req_keys_str} con {tc_count} Caso(s) de Prueba asociado(s)."
+                f"Trazabilidad completa: historia vinculada al Requerimiento {req_keys_only} con {tc_count} Caso(s) de Prueba asociado(s)."
                 if lang == "es" else
-                f"Story linked to Requirement(s) {req_keys_str} with {tc_count} associated Test Case(s)."
+                f"Full traceability: Story linked to Requirement {req_keys_only} with {tc_count} associated Test Case(s)."
             )
             checks_10 = [
                 (
-                    f"Enlace Story -> Req verificado: {req_keys_str}."
+                    f"Vínculo Story -> Requerimiento verificado: {req_keys_only}."
                     if lang == "es" else
-                    f"Story -> Req link verified: {req_keys_str}."
+                    f"Story -> Requirement link verified: {req_keys_only}."
                 ),
                 (
-                    f"Enlace Req -> Caso de Prueba verificado: {tc_count} caso(s) de prueba encontrado(s)."
+                    f"Vínculo Requerimiento -> Casos de Prueba verificado: {tc_count} caso(s) de prueba en Zephyr."
                     if lang == "es" else
-                    f"Req -> Test Case link verified: {tc_count} test case(s) found."
+                    f"Requirement -> Test Case link verified: {tc_count} test case(s) in Zephyr."
                 ),
             ]
             criteria_items.append({
@@ -1877,25 +1935,25 @@ def evaluate_single_story(
             })
         elif not zephyr.available:
             warn_10 = (
-                "Validación Req -> TC requiere token de Zephyr"
+                "Cobertura en Zephyr pendiente de verificación manual"
                 if lang == "es" else
-                "Req -> TC check requires Zephyr token"
+                "Zephyr coverage pending manual verification"
             )
             note_10 = (
-                f"Enlace Story -> Requerimiento verificado ({req_keys_str}). Token de Zephyr necesario para verificar enlaces Req -> TC."
+                f"Vínculo Story -> Requerimiento verificado ({req_keys_only}). Confirmar manualmente en Zephyr los casos de prueba asociados al Requerimiento."
                 if lang == "es" else
-                f"Story -> Requirement link verified ({req_keys_str}). Zephyr token needed to verify Req -> TC links."
+                f"Story -> Requirement link verified ({req_keys_only}). Confirm associated test cases on the Requirement in Zephyr manually."
             )
             checks_10 = [
                 (
-                    f"Confirmado que Story {key} está vinculada a Requerimiento(s): {req_keys_str}."
+                    f"Confirmado que la historia {key} está vinculada al Requerimiento: {req_keys_only}."
                     if lang == "es" else
-                    f"Confirmed Story {key} is linked to Requirement(s): {req_keys_str}."
+                    f"Confirmed Story {key} is linked to Requirement: {req_keys_only}."
                 ),
                 (
-                    "Token de Zephyr no provisto; no se pudo consultar automáticamente el enlace Req -> Test Case."
+                    "La consulta automática a Zephyr no estuvo disponible en esta ejecución para verificar el tramo Requerimiento -> Casos de Prueba."
                     if lang == "es" else
-                    "Zephyr API token not provided; Req -> Test Case link could not be queried automatically."
+                    "Automated Zephyr query was unavailable in this run to verify the Requirement -> Test Case link."
                 ),
             ]
             criteria_items.append({
@@ -1910,20 +1968,20 @@ def evaluate_single_story(
             })
         else:
             note_10 = (
-                f"La Story está vinculada a Requerimiento ({req_keys_str}), pero hay 0 Casos de Prueba vinculados a ese Requerimiento en Zephyr."
+                f"La historia está vinculada al Requerimiento {req_keys_only}, pero dicho Requerimiento no tiene Casos de Prueba asociados en Zephyr."
                 if lang == "es" else
-                f"Story is linked to Requirement ({req_keys_str}), but 0 Test Cases are linked to that Requirement in Zephyr."
+                f"Story is linked to Requirement {req_keys_only}, but that Requirement has 0 linked Test Cases in Zephyr."
             )
             checks_10 = [
                 (
-                    f"Enlace Story -> Req verificado ({req_keys_str})."
+                    f"Vínculo Story -> Requerimiento verificado ({req_keys_only})."
                     if lang == "es" else
-                    f"Story -> Req link verified ({req_keys_str})."
+                    f"Story -> Requirement link verified ({req_keys_only})."
                 ),
                 (
-                    "Validación Req -> Test Case falló: 0 Casos de Prueba encontrados en Zephyr para el/los Requerimiento(s) vinculado(s)."
+                    f"El Requerimiento {req_keys_only} no registra Casos de Prueba vinculados en Zephyr."
                     if lang == "es" else
-                    "Req -> Test Case check failed: 0 Test Cases found in Zephyr for the linked Requirement(s)."
+                    f"Requirement {req_keys_only} has 0 linked Test Cases in Zephyr."
                 ),
             ]
             criteria_items.append({
@@ -1937,9 +1995,9 @@ def evaluate_single_story(
                 "issues": [key] + [r["key"] for r in linked_reqs],
             })
             act_text_10 = (
-                f"Vincular los Casos de Prueba de Zephyr correspondientes al Requerimiento {', '.join(r['key'] for r in linked_reqs)} (para Story {key})."
+                f"Vincular en Zephyr los Casos de Prueba correspondientes al Requerimiento asociado a {key}."
                 if lang == "es" else
-                f"Link the corresponding Zephyr Test Cases to Requirement {', '.join(r['key'] for r in linked_reqs)} (for Story {key})."
+                f"Link the corresponding Zephyr Test Cases to the Requirement associated with {key}."
             )
             actions.append({
                 "group": "fix",
@@ -1949,14 +2007,14 @@ def evaluate_single_story(
             })
     else:
         note_10 = (
-            f"No hay ningún issue de tipo Requerimiento (Req) vinculado a {key}."
+            f"La historia {key} no tiene ningún Requerimiento (Req) vinculado en Jira."
             if lang == "es" else
-            f"No Requirement (Req) issue is linked to {key}."
+            f"Story {key} has no Requirement (Req) linked in Jira."
         )
         checks_10 = [
-            f"Inspeccionados parent e issuelinks de {key}: 0 issues de tipo 'Req' encontrados."
+            f"Se revisaron las relaciones de la historia {key} en Jira: no se encontró ningún ticket de tipo Requerimiento (Req) asociado."
             if lang == "es" else
-            f"Inspected parent and issuelinks of {key}: 0 issues of type 'Req' found."
+            f"Reviewed issue links of {key} in Jira: no Requirement (Req) issue found."
         ]
         criteria_items.append({
             "id": "10",
@@ -1969,9 +2027,9 @@ def evaluate_single_story(
             "issues": [key],
         })
         act_text_10 = (
-            f"Establecer el vínculo de trazabilidad obligatorio entre la Story {key} y su Requerimiento (Req) padre en Jira."
+            f"Vincular en Jira la historia {key} con su Requerimiento (Req) correspondiente."
             if lang == "es" else
-            f"Establish the mandatory traceability link between Story {key} and its parent Requirement (Req) in Jira."
+            f"Link Story {key} to its corresponding Requirement (Req) in Jira."
         )
         actions.append({
             "group": "fix",
@@ -1994,15 +2052,15 @@ def evaluate_single_story(
     if open_crit_bugs:
         bug_str = ", ".join(f"{b['key']} ({b['priority']}, {b['status']})" for b in open_crit_bugs)
         note_11 = (
-            f"{len(open_crit_bugs)} bug(s) Crítico(s)/Alto(s) permanecen abiertos: {bug_str}."
+            f"Hay {len(open_crit_bugs)} bug(s) de severidad Crítica/Alta abiertos vinculados a la historia: {bug_str}."
             if lang == "es" else
-            f"{len(open_crit_bugs)} Critical/High bug(s) remain open: {bug_str}."
+            f"{len(open_crit_bugs)} Critical/High bug(s) remain open on the story: {bug_str}."
         )
         checks_11 = [
             (
-                f"Bug Crítico/Alto abierto detectado: {b['key']} - {b['summary']}"
+                f"Defecto Crítico/Alto abierto: {b['key']} — {b['summary']} (prioridad: {b['priority']}, estado: {b['status']})."
                 if lang == "es" else
-                f"Found open Critical/High bug: {b['key']} - {b['summary']}"
+                f"Open Critical/High defect: {b['key']} — {b['summary']} (priority: {b['priority']}, status: {b['status']})."
             )
             for b in open_crit_bugs
         ]
@@ -2029,14 +2087,14 @@ def evaluate_single_story(
         })
     else:
         note_11 = (
-            f"0 bugs Críticos/Altos abiertos vinculados a {key} ({len(linked_bugs)} bugs vinculados en total, {len(open_any_bugs)} no críticos abiertos)."
+            f"No hay bugs Críticos ni Altos abiertos vinculados a {key} ({len(linked_bugs)} bug(s) vinculados en total, {len(open_any_bugs)} menores abiertos)."
             if lang == "es" else
-            f"0 open Critical/High bugs linked to {key} ({len(linked_bugs)} total linked bug(s), {len(open_any_bugs)} open non-critical)."
+            f"No open Critical/High bugs linked to {key} ({len(linked_bugs)} total linked bug(s), {len(open_any_bugs)} open minor)."
         )
         checks_11 = [
-            "Inspeccionados todos los issues de tipo Bug vinculados: no se encontraron defectos Críticos/Altos (S4/S5) abiertos."
+            "Se revisaron todos los defectos vinculados a la historia: ninguno de severidad Crítica o Alta (S4/S5) permanece abierto."
             if lang == "es" else
-            "Inspected all linked Bug issues: no open Critical/High (S4/S5) defects found."
+            "Reviewed all linked Bug issues: no Critical or High (S4/S5) defects remain open."
         ]
         criteria_items.append({
             "id": "11",
@@ -2056,16 +2114,16 @@ def evaluate_single_story(
     if not zephyr.available:
         manual_actions_spec = {
             "12": {
-                "en": f"Confirm in Zephyr that test cases were created/updated for {key}.",
-                "es": f"Confirmar en Zephyr que los casos de prueba fueron creados/actualizados para {key}.",
+                "en": f"Confirm in Zephyr that test cases were created or updated for {key}.",
+                "es": f"Confirmar en Zephyr que los casos de prueba fueron creados o actualizados para {key}.",
             },
             "13": {
-                "en": f"Confirm in Zephyr that all test cases for {key} have status 'Approved'.",
-                "es": f"Confirmar en Zephyr que todos los casos de prueba para {key} tengan estado 'Approved'.",
+                "en": f"Confirm in Zephyr that all test cases for {key} are in 'Approved' status.",
+                "es": f"Confirmar en Zephyr que todos los casos de prueba de {key} estén en estado 'Approved'.",
             },
             "14": {
                 "en": f"Confirm in Zephyr that test cases for {key} were executed and passed on pre-staging.",
-                "es": f"Confirmar en Zephyr que los casos de prueba para {key} fueron ejecutados y pasaron en pre-staging.",
+                "es": f"Confirmar en Zephyr que los casos de prueba de {key} fueron ejecutados con resultado aprobado en pre-staging.",
             },
             "15": {
                 "en": f"Verify that test execution evidence is recorded in Zephyr for {key}.",
@@ -2075,14 +2133,14 @@ def evaluate_single_story(
         for cid in ("12", "13", "14", "15"):
             spec_z = CRITERIA_SPECS[cid][lang]
             note_z = (
-                "Token de API de Zephyr no configurado en esta ejecución; se requiere verificación manual en Zephyr."
+                "La consulta automática a Zephyr no estuvo disponible en esta ejecución; requiere verificación manual en Zephyr."
                 if lang == "es" else
-                "Zephyr API token not configured in this run; manual verification in Zephyr required."
+                "Automated Zephyr query was unavailable in this run; manual verification in Zephyr is required."
             )
             checks_z = [
-                "Configurar ZEPHYR_API_TOKEN o pasar --zephyr-token para automatizar las validaciones de Zephyr Scale."
+                "Verificar directamente en Zephyr Scale el estado y las ejecuciones de los casos de prueba asociados al requerimiento."
                 if lang == "es" else
-                "Set ZEPHYR_API_TOKEN or pass --zephyr-token to automate Zephyr Scale checks."
+                "Verify the status and executions of test cases associated with the requirement directly in Zephyr Scale."
             ]
             criteria_items.append({
                 "id": cid,
@@ -2107,15 +2165,15 @@ def evaluate_single_story(
         if zephyr_tcs:
             tc_list_str = ", ".join(f"{t['key']} ({t['status']})" for t in zephyr_tcs)
             note_12 = (
-                f"{len(zephyr_tcs)} Caso(s) de Prueba de Zephyr encontrado(s): {tc_list_str}."
+                f"Se encontraron {len(zephyr_tcs)} Caso(s) de Prueba en Zephyr: {tc_list_str}."
                 if lang == "es" else
-                f"{len(zephyr_tcs)} Zephyr Test Case(s) found: {tc_list_str}."
+                f"Found {len(zephyr_tcs)} Zephyr Test Case(s): {tc_list_str}."
             )
             checks_12 = [
                 (
-                    f"{t['key']} (vía {t.get('linked_via')}): {t['name']} [estado: {t['status']}]"
+                    f"{t['key']} (vinculado vía {t.get('linked_via')}): {t['name']} — estado: {t['status']}."
                     if lang == "es" else
-                    f"{t['key']} (via {t.get('linked_via')}): {t['name']} [status: {t['status']}]"
+                    f"{t['key']} (linked via {t.get('linked_via')}): {t['name']} — status: {t['status']}."
                 )
                 for t in zephyr_tcs
             ]
@@ -2130,14 +2188,14 @@ def evaluate_single_story(
             })
         else:
             note_12 = (
-                "0 Casos de Prueba de Zephyr encontrados para la Story o su(s) Requerimiento(s) vinculado(s)."
+                "No se encontraron Casos de Prueba en Zephyr asociados a la historia ni a su Requerimiento."
                 if lang == "es" else
-                "0 Zephyr Test Cases found for the Story or its linked Requirement(s)."
+                "No Zephyr Test Cases found for the Story or its linked Requirement."
             )
             checks_12 = [
-                "Consultada API de Zephyr Scale para el Requerimiento y Story: 0 casos de prueba retornados."
+                "Se consultó Zephyr Scale para la historia y su Requerimiento vinculado: no hay casos de prueba registrados."
                 if lang == "es" else
-                "Queried Zephyr Scale API for linked Requirement(s) and Story: 0 test cases returned."
+                "Checked Zephyr Scale for the Story and its linked Requirement: 0 test cases found."
             ]
             criteria_items.append({
                 "id": "12",
@@ -2150,7 +2208,7 @@ def evaluate_single_story(
                 "issues": [key],
             })
             act_text_12 = (
-                f"Crear o vincular los Casos de Prueba de Zephyr correspondientes al Requerimiento de {key}."
+                f"Crear o vincular en Zephyr los Casos de Prueba correspondientes al Requerimiento de {key}."
                 if lang == "es" else
                 f"Create or link the corresponding Zephyr Test Cases to the Requirement of {key}."
             )
@@ -2168,20 +2226,20 @@ def evaluate_single_story(
         unapproved_tcs = [t for t in active_tcs if str(t.get("status", "")).lower() != "approved"]
         if active_tcs and not unapproved_tcs:
             note_13 = (
-                f"Todos los {len(active_tcs)} Caso(s) de Prueba activos de Zephyr están en estado 'Approved'."
+                f"Los {len(active_tcs)} Caso(s) de Prueba activos en Zephyr están revisados y aprobados ('Approved')."
                 if lang == "es" else
-                f"All {len(active_tcs)} active Zephyr Test Case(s) are in 'Approved' status."
+                f"All {len(active_tcs)} active Zephyr Test Case(s) are reviewed and in 'Approved' status."
             )
             checks_13 = [
-                (f"{t['key']}: estado = {t['status']}" if lang == "es" else f"{t['key']}: status = {t['status']}")
+                (f"{t['key']} ({t['name']}): estado {t['status']}." if lang == "es" else f"{t['key']} ({t['name']}): status {t['status']}.")
                 for t in active_tcs
             ]
             if deprecated_tcs:
                 dep_keys = ", ".join(t["key"] for t in deprecated_tcs)
                 checks_13.append(
-                    f"{len(deprecated_tcs)} caso(s) deprecado(s)/obsoleto(s) ignorados: {dep_keys}."
+                    f"Se omitieron {len(deprecated_tcs)} caso(s) de prueba obsoletos (Deprecated): {dep_keys}."
                     if lang == "es" else
-                    f"{len(deprecated_tcs)} deprecated/superseded test case(s) ignored: {dep_keys}."
+                    f"Ignored {len(deprecated_tcs)} deprecated test case(s): {dep_keys}."
                 )
             criteria_items.append({
                 "id": "13",
@@ -2195,22 +2253,26 @@ def evaluate_single_story(
         else:
             if lang == "es":
                 note_13 = (
-                    f"{len(unapproved_tcs)}/{len(active_tcs)} Caso(s) de Prueba no están 'Approved': "
+                    f"{len(unapproved_tcs)} de {len(active_tcs)} Caso(s) de Prueba aún no están en estado 'Approved': "
                     + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
                     if active_tcs
-                    else "No se encontraron casos de prueba para verificar estado de aprobación."
+                    else "No hay casos de prueba vinculados para verificar su aprobación."
                 )
             else:
                 note_13 = (
-                    f"{len(unapproved_tcs)}/{len(active_tcs)} Test Case(s) are not 'Approved': "
+                    f"{len(unapproved_tcs)} of {len(active_tcs)} Test Case(s) are not yet 'Approved': "
                     + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
                     if active_tcs
-                    else "No Test Cases found to verify approval status."
+                    else "No linked Test Cases found to verify approval status."
                 )
             checks_13 = [
-                (f"{t['key']}: estado = {t['status']}" if lang == "es" else f"{t['key']}: status = {t['status']}")
+                (f"{t['key']} ({t['name']}): estado actual {t['status']}." if lang == "es" else f"{t['key']} ({t['name']}): current status {t['status']}.")
                 for t in active_tcs
-            ] or (["0 Casos de Prueba encontrados."] if lang == "es" else ["0 Test Cases found."])
+            ] or (
+                ["No hay casos de prueba registrados en Zephyr para evaluar su estado de revisión."]
+                if lang == "es" else
+                ["No test cases recorded in Zephyr to evaluate review status."]
+            )
             criteria_items.append({
                 "id": "13",
                 "group": spec_13["group"],
@@ -2223,9 +2285,9 @@ def evaluate_single_story(
             })
             if unapproved_tcs:
                 act_text_13 = (
-                    f"Revisar y transicionar Caso(s) de Prueba de Zephyr a 'Approved': {', '.join(t['key'] for t in unapproved_tcs)}."
+                    f"Revisar y pasar a estado 'Approved' los Casos de Prueba de Zephyr asociados a {key}: {', '.join(t['key'] for t in unapproved_tcs)}."
                     if lang == "es" else
-                    f"Review and transition Zephyr Test Case(s) to 'Approved': {', '.join(t['key'] for t in unapproved_tcs)}."
+                    f"Review and transition Zephyr Test Cases to 'Approved' for {key}: {', '.join(t['key'] for t in unapproved_tcs)}."
                 )
                 actions.append({
                     "group": "fix",
@@ -2250,15 +2312,15 @@ def evaluate_single_story(
 
         if eval_tcs and not failed_or_unexec_tcs:
             note_14 = (
-                f"Todos los {len(eval_tcs)} Caso(s) de Prueba activos tienen ejecuciones aprobadas en Zephyr."
+                f"Los {len(eval_tcs)} Caso(s) de Prueba activos cuentan con ejecución aprobada en Zephyr."
                 if lang == "es" else
                 f"All {len(eval_tcs)} active Test Case(s) have passing executions in Zephyr."
             )
             checks_14 = [
                 (
-                    f"{tk}: último pase el {ex.get('date', 'N/A')} (entorno: {ex.get('environment') or 'default'})"
+                    f"{tk}: última ejecución aprobada el {ex.get('date', 'N/A')} (entorno: {ex.get('environment') or 'pre-staging'})."
                     if lang == "es" else
-                    f"{tk}: last pass on {ex.get('date', 'N/A')} (env: {ex.get('environment') or 'default'})"
+                    f"{tk}: last passing execution on {ex.get('date', 'N/A')} (environment: {ex.get('environment') or 'pre-staging'})."
                 )
                 for tk, ex in passed_tcs
             ]
@@ -2278,9 +2340,9 @@ def evaluate_single_story(
             )
             checks_15 = [
                 (
-                    f"ID de ejecución {ex.get('id')} vinculado a {tk} ({ex.get('status')})."
+                    f"Ejecución #{ex.get('id')} registrada para {tk} con resultado {ex.get('status')}."
                     if lang == "es" else
-                    f"Execution ID {ex.get('id')} linked to {tk} ({ex.get('status')})."
+                    f"Execution #{ex.get('id')} recorded for {tk} with status {ex.get('status')}."
                 )
                 for tk, ex in passed_tcs
             ]
@@ -2294,16 +2356,23 @@ def evaluate_single_story(
                 "checks": checks_15,
             })
         else:
-            missing_str = ", ".join(failed_or_unexec_tcs) if failed_or_unexec_tcs else ("Sin casos de prueba vinculados" if lang == "es" else "No test cases linked")
+            missing_str = ", ".join(failed_or_unexec_tcs) if failed_or_unexec_tcs else ("ningún caso de prueba vinculado" if lang == "es" else "no test cases linked")
             note_fail = (
-                f"Falta evidencia de ejecución aprobada para: {missing_str}."
+                f"Falta evidencia de ejecución aprobada (PASS) en Zephyr ({missing_str})."
                 if lang == "es" else
-                f"Missing passing execution evidence for: {missing_str}."
+                f"Missing passing (PASS) execution evidence in Zephyr ({missing_str})."
             )
             checks_fail = [
-                f"Casos de prueba sin ejecución PASS: {missing_str}"
-                if lang == "es" else
-                f"Test cases without PASS execution: {missing_str}"
+                (
+                    f"Casos de prueba sin ejecución aprobada (PASS) en Zephyr: {missing_str}."
+                    if failed_or_unexec_tcs else
+                    "No hay casos de prueba vinculados en Zephyr para verificar registros de ejecución."
+                )
+                if lang == "es" else (
+                    f"Test cases without a PASS execution in Zephyr: {missing_str}."
+                    if failed_or_unexec_tcs else
+                    "No linked test cases in Zephyr to verify execution records."
+                )
             ]
             criteria_items.append({
                 "id": "14",
@@ -2326,9 +2395,9 @@ def evaluate_single_story(
                 "issues": [key],
             })
             act_text_14 = (
-                f"Ejecutar casos de prueba en pre-staging y registrar resultados PASS en Zephyr para {key} ({missing_str})."
+                f"Ejecutar los casos de prueba en pre-staging y registrar el resultado aprobado (PASS) en Zephyr para {key}."
                 if lang == "es" else
-                f"Execute test cases on pre-staging and record PASS results in Zephyr for {key} ({missing_str})."
+                f"Execute test cases on pre-staging and record PASS results in Zephyr for {key}."
             )
             actions.append({
                 "group": "fix",
@@ -2352,11 +2421,11 @@ def evaluate_single_story(
     drive_urls = DRIVE_URL_RE.findall(all_text)
 
     doc_items_spec = [
-        ("16", "soup", "0GS-001 Software Configuration Management Plan", "0GS-001 Software Configuration Management Plan"),
+        ("16", "soup", "0GS-001 Software Configuration Management Plan", "Plan de Gestión de Configuración (0GS-001 SCMP)"),
         ("17", "architecture", "Product Architecture Document", "Documento de Arquitectura de Producto"),
         ("18", "design doc", "Product Design Document", "Documento de Diseño de Producto"),
         ("19", "api", "API Documentation", "Documentación de APIs"),
-        ("20", "doc", "General Technical/User Documentation", "Documentación Técnica o de Usuario General"),
+        ("20", "doc", "General Technical/User Documentation", "Documentación Técnica o Manual de Usuario"),
     ]
 
     for cid, kw, doc_label_en, doc_label_es in doc_items_spec:
@@ -2368,15 +2437,15 @@ def evaluate_single_story(
         if matching_st and open_matching_st:
             st_keys = ", ".join(f"{s['key']} ({s['status']})" for s in open_matching_st)
             note_doc = (
-                f"Subtarea(s) de documentación aún abierta(s): {st_keys}."
+                f"Subtarea(s) de documentación pendientes de cierre: {st_keys}."
                 if lang == "es" else
                 f"Documentation sub-task(s) still open: {st_keys}."
             )
             checks_doc = [
                 (
-                    f"Subtarea de documentación abierta encontrada: {s['key']} - {s['summary']} [{s['status']}]"
+                    f"Subtarea de documentación abierta: {s['key']} — {s['summary']} (estado: {s['status']})."
                     if lang == "es" else
-                    f"Found open documentation sub-task: {s['key']} - {s['summary']} [{s['status']}]"
+                    f"Open documentation sub-task: {s['key']} — {s['summary']} (status: {s['status']})."
                 )
                 for s in open_matching_st
             ]
@@ -2391,9 +2460,9 @@ def evaluate_single_story(
                 "issues": [key] + [s["key"] for s in open_matching_st],
             })
             act_text_doc = (
-                f"Completar y cerrar la(s) subtarea(s) de documentación pendiente(s) para {key}: {st_keys}."
+                f"Completar y cerrar la(s) subtarea(s) de documentación pendientes en {key}."
                 if lang == "es" else
-                f"Complete and close pending documentation sub-task(s) for {key}: {st_keys}."
+                f"Complete and close pending documentation sub-task(s) on {key}."
             )
             actions.append({
                 "group": "fix",
@@ -2404,15 +2473,15 @@ def evaluate_single_story(
         elif matching_st and not open_matching_st:
             st_keys = ", ".join(f"{s['key']} ({s['status']})" for s in matching_st)
             note_doc = (
-                f"Subtarea(s) de documentación completada(s): {st_keys}."
+                f"Subtarea(s) de documentación completadas: {st_keys}."
                 if lang == "es" else
                 f"Documentation sub-task(s) completed: {st_keys}."
             )
             checks_doc = [
                 (
-                    f"Subtarea completada verificada: {s['key']} - {s['summary']} [{s['status']}]"
+                    f"Subtarea completada: {s['key']} — {s['summary']} (estado: {s['status']})."
                     if lang == "es" else
-                    f"Verified completed sub-task: {s['key']} - {s['summary']} [{s['status']}]"
+                    f"Completed sub-task: {s['key']} — {s['summary']} (status: {s['status']})."
                 )
                 for s in matching_st
             ]
@@ -2427,12 +2496,12 @@ def evaluate_single_story(
             })
         elif drive_urls and cid == "20":
             note_doc = (
-                f"Enlace(s) de documentación en Google Drive referenciado(s) en la historia ({len(drive_urls)} enlace(s))."
+                f"Documentación vinculada en Google Drive dentro de la historia ({len(drive_urls)} enlace(s))."
                 if lang == "es" else
                 f"Google Drive documentation link(s) referenced in story ({len(drive_urls)} link(s))."
             )
             checks_doc = [
-                (f"Enlace de Google Drive encontrado: {u}" if lang == "es" else f"Found Google Drive link: {u}")
+                (f"Enlace de documentación en Google Drive: {u}" if lang == "es" else f"Google Drive documentation link: {u}")
                 for u in drive_urls
             ]
             criteria_items.append({
@@ -2447,20 +2516,20 @@ def evaluate_single_story(
             })
         else:
             warn_doc = (
-                "Cuando aplique (sin subtarea de doc creada)"
+                "No aplica según alcance de la historia"
                 if lang == "es" else
-                "When applicable (no doc sub-task created)"
+                "Not applicable per story scope"
             )
             note_doc = (
-                f"No se detectaron subtareas abiertas de '{doc_label}' (se considera N/A a menos que se hayan introducido cambios de arquitectura/API/SOUP)."
+                f"Sin subtareas pendientes para '{doc_label}' (no requerido salvo cambios específicos en ese alcance)."
                 if lang == "es" else
-                f"No open '{doc_label}' sub-tasks detected (treated as N/A unless architectural/API/SOUP changes were introduced)."
+                f"No pending sub-tasks for '{doc_label}' (not required unless scope changes apply)."
             )
             checks_doc = [
                 (
-                    f"Inspeccionadas subtareas y etiquetas de {key}: no se encontró tarea pendiente de '{doc_label}'."
+                    f"Se revisaron las subtareas de {key}: no se registran tareas pendientes de '{doc_label}'."
                     if lang == "es" else
-                    f"Inspected sub-tasks and labels of {key}: no pending '{doc_label}' task found."
+                    f"Reviewed sub-tasks of {key}: no pending tasks for '{doc_label}'."
                 )
             ]
             criteria_items.append({
@@ -2506,35 +2575,35 @@ def evaluate_single_story(
     if is_resolved_or_closed and is_res_done:
         closure_checks = [
             (
-                f"Estado actual: {status_name} | Resolución: {resolution_name}."
+                f"Estado actual en Jira: {status_name} (Resolución: {resolution_name})."
                 if lang == "es" else
-                f"Current Status: {status_name} | Resolution: {resolution_name}."
+                f"Current Jira status: {status_name} (Resolution: {resolution_name})."
             ),
         ]
         if resolved_by:
             closure_checks.append(
-                f"Transicionada a Resolved por {resolved_by} el {resolved_date}."
+                f"Marcada como Resolved por {resolved_by} el {resolved_date}."
                 if lang == "es" else
-                f"Transitioned to Resolved by {resolved_by} on {resolved_date}."
+                f"Marked Resolved by {resolved_by} on {resolved_date}."
             )
         warn_21: Optional[str] = None
         if status_name.lower() == "closed" and closed_by:
             if is_po_or_proxy(closed_by):
                 closure_checks.append(
-                    f"Transicionada a Closed por PO/PO Proxy autorizado: {closed_by} ({closed_date})."
+                    f"Cerrada (Closed) por PO / PO Proxy autorizado: {closed_by} ({closed_date})."
                     if lang == "es" else
-                    f"Transitioned to Closed by authorized PO/PO Proxy: {closed_by} ({closed_date})."
+                    f"Closed by authorized PO / PO Proxy: {closed_by} ({closed_date})."
                 )
             else:
                 warn_21 = (
-                    f"Cerrada por {closed_by} (no es PO/PO Proxy)"
+                    f"Cerrada por {closed_by} (no es PO ni PO Proxy)"
                     if lang == "es" else
-                    f"Closed by {closed_by} (not PO/PO Proxy)"
+                    f"Closed by {closed_by} (not PO or PO Proxy)"
                 )
                 closure_checks.append(
-                    f"Advertencia: Transicionada a Closed por {closed_by} el {closed_date} (se esperaba PO Matt Miller o PO Proxy Vanesa Savino)."
+                    f"Atención: pasada a Closed por {closed_by} el {closed_date} (el cierre de User Stories corresponde a Matt Miller o Vanesa Savino)."
                     if lang == "es" else
-                    f"Warning: Transitioned to Closed by {closed_by} on {closed_date} (expected PO Matt Miller or PO Proxy Vanesa Savino)."
+                    f"Notice: transitioned to Closed by {closed_by} on {closed_date} (User Story closure is reserved for Matt Miller or Vanesa Savino)."
                 )
         item_21: Dict[str, Any] = {
             "id": "21",
@@ -2543,9 +2612,9 @@ def evaluate_single_story(
             "description": spec_21["description"],
             "status": "pass",
             "note": (
-                f"La Story está en '{status_name}' con resolución '{resolution_name}'."
+                f"La historia se encuentra en estado '{status_name}' con resolución '{resolution_name}'."
                 if lang == "es" else
-                f"Story is {status_name} with resolution '{resolution_name}'."
+                f"Story is in '{status_name}' status with resolution '{resolution_name}'."
             ),
             "checks": closure_checks,
         }
@@ -2554,15 +2623,15 @@ def evaluate_single_story(
         criteria_items.append(item_21)
     else:
         note_21 = (
-            f"La Story está actualmente en '{status_name}' con resolución '{resolution_name}' (se esperaba Resolved/Closed + Done)."
+            f"La historia se encuentra en estado '{status_name}' (resolución: '{resolution_name}'); requiere estar en Resolved o Closed con resolución 'Done'."
             if lang == "es" else
-            f"Story is currently in '{status_name}' with resolution '{resolution_name}' (expected Resolved/Closed + Done)."
+            f"Story is currently in '{status_name}' (resolution: '{resolution_name}'); requires Resolved or Closed with resolution 'Done'."
         )
         checks_21 = [
             (
-                f"Estado actual = '{status_name}', Resolución = '{resolution_name}'."
+                f"Estado actual en Jira: {status_name} — Resolución: {resolution_name}."
                 if lang == "es" else
-                f"Current Status = '{status_name}', Resolution = '{resolution_name}'."
+                f"Current Jira status: {status_name} — Resolution: {resolution_name}."
             )
         ]
         criteria_items.append({
@@ -2576,9 +2645,9 @@ def evaluate_single_story(
             "issues": [key],
         })
         act_text_21 = (
-            f"Una vez que pasen todas las validaciones del DoD, transicionar {key} a 'Resolved' con resolución 'Done'."
+            f"Una vez completadas las validaciones de la DoD, pasar {key} a estado 'Resolved' con resolución 'Done'."
             if lang == "es" else
-            f"Once all DoD checks pass, transition {key} to 'Resolved' with resolution 'Done'."
+            f"Once all DoD validations are complete, transition {key} to 'Resolved' with resolution 'Done'."
         )
         actions.append({
             "group": "fix",
@@ -2594,17 +2663,17 @@ def evaluate_single_story(
 
     flags: List[str] = []
     if pr_count == 0:
-        flags.append("no-pr")
+        flags.append("Sin Pull Request vinculado" if lang == "es" else "No PR linked")
     elif open_prs:
-        flags.append("open-pr")
+        flags.append("Tiene PR abierto" if lang == "es" else "Open PR")
     elif not all_prs_properly_approved:
-        flags.append("missing-approvals")
+        flags.append("Faltan aprobaciones de PR" if lang == "es" else "Missing PR approvals")
     if not linked_reqs:
-        flags.append("missing-req-link")
+        flags.append("Sin requerimiento vinculado" if lang == "es" else "Missing requirement link")
     if not figma_urls and not no_figma_declared:
-        flags.append("missing-figma")
+        flags.append("Falta diseño en Figma" if lang == "es" else "Missing Figma design")
     if not is_resolved_or_closed or not is_res_done:
-        flags.append(f"status:{status_name}")
+        flags.append(f"Estado actual: {status_name}" if lang == "es" else f"Current status: {status_name}")
 
     return {
         "key": key,
@@ -2812,29 +2881,28 @@ def build_single_story_report(
         },
     ]
 
+    zephyr_unavailable_reason = (
+        "La conexión con Zephyr Scale no estuvo disponible en esta ejecución; los casos de prueba se verifican manualmente."
+        if lang == "es" else
+        "Zephyr Scale connection was unavailable in this run; test cases are marked for manual verification."
+    )
     sources = [
-        {"name": "Jira REST API v3", "kind": "jira", "status": "ok"},
-        {"name": "Bitbucket PRs (Jira dev-status)", "kind": "bitbucket", "status": "ok"},
+        {"name": "Jira", "kind": "jira", "status": "ok"},
+        {"name": "Bitbucket / Pull Requests", "kind": "bitbucket", "status": "ok"},
         {
-            "name": "Zephyr Scale API",
+            "name": "Zephyr Scale",
             "kind": "other",
             "status": "ok" if zephyr.available and not zephyr.last_error else "unavailable",
-            "reason": zephyr.last_error if zephyr.last_error else (
-                None if zephyr.available else (
-                    "ZEPHYR_API_TOKEN no configurado; validaciones de casos de prueba marcadas para verificación manual."
-                    if lang == "es" else
-                    "ZEPHYR_API_TOKEN not provided; test case checks marked for manual verification."
-                )
-            ),
+            "reason": None if (zephyr.available and not zephyr.last_error) else zephyr_unavailable_reason,
         },
         {
             "name": "Jenkins CI",
             "kind": "jenkins",
             "status": "unavailable",
             "reason": (
-                "La integración del plugin Jira-Jenkins está pendiente; el estado del build oficial se verifica manualmente."
+                "La integración automática con Jenkins está pendiente; el estado del build oficial se verifica manualmente."
                 if lang == "es" else
-                "Jira-Jenkins plugin integration is pending; official build status is verified manually."
+                "Automated Jenkins integration is pending; official build status is verified manually."
             ),
         },
     ]
@@ -2860,17 +2928,6 @@ def build_single_story_report(
             "status": "fail" if fail_count > 0 else "manual",
         },
     ]
-
-    notice_title = (
-        "Modo Direct REST Gateway (Optimizado en Tokens)"
-        if lang == "es" else
-        "Direct REST Gateway Mode (Token-Optimized)"
-    )
-    notice_text = (
-        "Esta auditoría se ejecutó directamente contra la API REST v3 y dev-status de Jira sin cargar esquemas MCP pesados en el contexto del LLM."
-        if lang == "es" else
-        "This audit was executed directly against the Jira REST API v3 and dev-status endpoints without loading bulky MCP schemas into the LLM context."
-    )
 
     return {
         "schema_version": "1.0",
@@ -2899,13 +2956,7 @@ def build_single_story_report(
             "headline": headline,
             "kpis": kpis,
         },
-        "notices": [
-            {
-                "level": "info",
-                "title": notice_title,
-                "text": notice_text,
-            }
-        ],
+        "notices": [],
         "sections": sections,
         "actions": actions_with_practice,
     }
@@ -2945,30 +2996,37 @@ def build_sprint_batch_report(
             if c_failing_keys:
                 c_status = "fail"
                 c_note = (
-                    f"{len(c_failing_keys)} de {total_stories} stories no cumplen este criterio ({c_pass_count} aprobadas)."
+                    f"{len(c_failing_keys)} de {total_stories} historias aún no cumplen este criterio ({c_pass_count} cumplidas)."
                     if lang == "es" else
-                    f"{len(c_failing_keys)} of {total_stories} stories fail this criterion ({c_pass_count} pass)."
+                    f"{len(c_failing_keys)} of {total_stories} stories do not yet meet this criterion ({c_pass_count} passed)."
                 )
             elif c_manual_keys:
                 c_status = "manual"
                 c_note = (
-                    f"Requiere confirmación manual en {len(c_manual_keys)} stories."
+                    f"Requiere confirmación manual en {len(c_manual_keys)} historia(s)."
                     if lang == "es" else
                     f"Requires manual confirmation across {len(c_manual_keys)} stories."
                 )
             else:
                 c_status = "pass"
                 c_note = (
-                    f"Todas las {total_stories} stories en {sprint_label} cumplen este criterio."
+                    f"Las {total_stories} historias de {sprint_label} cumplen este criterio."
                     if lang == "es" else
                     f"All {total_stories} stories in {sprint_label} pass this criterion."
                 )
 
-            c_check = (
-                f"Evaluadas {total_stories} stories: {c_pass_count} Aprobadas, {len(c_failing_keys)} Fallidas, {len(c_manual_keys)} Manuales."
+            c_check_summary = (
+                f"Se evaluaron {total_stories} historias: {c_pass_count} cumplidas, {len(c_failing_keys)} con pendientes y {len(c_manual_keys)} de revisión manual."
                 if lang == "es" else
-                f"Evaluated {total_stories} stories: {c_pass_count} Passed, {len(c_failing_keys)} Failed, {len(c_manual_keys)} Manual."
+                f"Evaluated {total_stories} stories: {c_pass_count} passed, {len(c_failing_keys)} failing, {len(c_manual_keys)} manual."
             )
+            c_checks_list = [c_check_summary]
+            for s in story_evals:
+                sc = s["criteria"][idx]
+                if sc["status"] == "fail":
+                    first_detail = (sc.get("checks") or [sc.get("note", "")])[0]
+                    c_checks_list.append(f"{s['key']}: {first_detail}")
+
             agg_item: Dict[str, Any] = {
                 "id": cid,
                 "group": tmpl.get("group", "Story DoD"),
@@ -2976,7 +3034,7 @@ def build_sprint_batch_report(
                 "description": tmpl["description"],
                 "status": c_status,
                 "note": c_note,
-                "checks": [c_check],
+                "checks": c_checks_list,
             }
             if c_status == "manual":
                 agg_item["reason"] = tmpl.get("reason", "by-design")
@@ -2997,10 +3055,11 @@ def build_sprint_batch_report(
             "type": s["issue_type"],
             "summary": s["summary"],
             "status": s["status"],
+            "resolution": s["resolution"],
             "status_category": "pass" if s["fail_count"] == 0 else "fail",
             "assignee": s["assignee"],
             "parent": s["parent_key"],
-            "flags": s["flags"] or ["dod-ok"],
+            "flags": s["flags"] or (["DoD completa"] if lang == "es" else ["DoD OK"]),
         })
         pr_badge = f"{len(s['prs'])} PR(s)" if s["prs"] else ("Sin PR" if lang == "es" else "No PR")
         missing_req_label = "FALTANTE" if lang == "es" else "MISSING"
@@ -3037,9 +3096,9 @@ def build_sprint_batch_report(
 
     for crit_id, (desc_tmpl, keys_list) in failing_by_crit.items():
         act_prefix = (
-            f"[Criterio #{crit_id}] Corregir en {len(keys_list)} story/stories: {desc_tmpl}"
+            f"[Criterio #{crit_id}] En {len(keys_list)} historia(s): {desc_tmpl}"
             if lang == "es" else
-            f"[Criterion #{crit_id}] Fix across {len(keys_list)} story/stories: {desc_tmpl}"
+            f"[Criterion #{crit_id}] Across {len(keys_list)} story/stories: {desc_tmpl}"
         )
         consolidated_actions.append({
             "group": "fix",
@@ -3049,7 +3108,7 @@ def build_sprint_batch_report(
         })
 
     jenkins_action = (
-        f"Confirmar en Jenkins que los builds oficiales pasaron con éxito para las {total_stories} stories de {sprint_label}."
+        f"Confirmar en Jenkins que los builds oficiales pasaron con éxito para las {total_stories} historias de {sprint_label}."
         if lang == "es" else
         f"Confirm in Jenkins that official builds passed for all {total_stories} stories in {sprint_label}."
     )
@@ -3073,29 +3132,28 @@ def build_sprint_batch_report(
             else f"All {total_stories} User Stories in {sprint_label} pass automated DoD checks!"
         )
 
+    zephyr_batch_reason = (
+        "La conexión con Zephyr Scale no estuvo disponible en esta ejecución; los casos de prueba se verifican manualmente."
+        if lang == "es" else
+        "Zephyr Scale connection was unavailable in this run; test cases are marked for manual verification."
+    )
     sources = [
-        {"name": "Jira REST API v3", "kind": "jira", "status": "ok"},
-        {"name": "Bitbucket PRs (Jira dev-status)", "kind": "bitbucket", "status": "ok"},
+        {"name": "Jira", "kind": "jira", "status": "ok"},
+        {"name": "Bitbucket / Pull Requests", "kind": "bitbucket", "status": "ok"},
         {
-            "name": "Zephyr Scale API",
+            "name": "Zephyr Scale",
             "kind": "other",
             "status": "ok" if zephyr.available and not zephyr.last_error else "unavailable",
-            "reason": zephyr.last_error if zephyr.last_error else (
-                None if zephyr.available else (
-                    "ZEPHYR_API_TOKEN no configurado; validaciones de casos de prueba marcadas para verificación manual."
-                    if lang == "es" else
-                    "ZEPHYR_API_TOKEN not provided."
-                )
-            ),
+            "reason": None if (zephyr.available and not zephyr.last_error) else zephyr_batch_reason,
         },
         {
             "name": "Jenkins CI",
             "kind": "jenkins",
             "status": "unavailable",
             "reason": (
-                "La integración del plugin Jira-Jenkins está pendiente."
+                "La integración automática con Jenkins está pendiente."
                 if lang == "es" else
-                "Jira-Jenkins integration pending."
+                "Automated Jenkins integration is pending."
             ),
         },
     ]

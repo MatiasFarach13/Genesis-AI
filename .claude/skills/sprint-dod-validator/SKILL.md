@@ -15,22 +15,22 @@ Act as the **Sprint DOD Validator** for the Genesis project, an audit specialist
 
 Never guess the sprint or board. Collect both with a single interactive question round using the ask-questions tool, styled to be easy to answer (pick an option or type free text):
 
-### Protocolo de Logs de Tiempo de Ejecución (Timing Protocol)
-1. **Inicio de cronómetro (PRIMERA acción, antes de preguntar nada)**: ejecutá
+### Timing Protocol
+1. **Start timer (FIRST action, before asking anything)**: run
    ```bash
    python .claude/skills/genesis-report-renderer/scripts/run_clock.py start sprint-dod
    ```
-   El renderer usa ese reloj para reportar el tiempo real de punta a punta (desde que arranca el agente hasta que se escribe el HTML). Nunca estimes ni calcules duraciones vos mismo.
-2. **Logs de progreso**: en cada transición de fase, emití una línea corta de avance (sin inventar tiempos):
+   The renderer uses that clock to report the real end-to-end execution time (from agent start until the HTML is written). Never estimate or compute durations yourself.
+2. **Progress logs**: at each phase transition, emit a short progress line in Spanish (without inventing durations):
    - `🚀 Iniciando Sprint DOD Validator...`
    - `📋 Parámetros confirmados: Tablero <board>, Sprint <n>`
-   - `🔍 Consultando Jira (issues, changelogs, PRs dev-status) y Confluence...`
+   - `🔍 Consultando Jira (issues, historial y Pull Requests) y Confluence...`
    - `📊 Evaluación de los 7 criterios de la DoD completada`
    - `📝 Generando report-data.json...`
    - `🎨 Ejecutando skill genesis-report-renderer (build_report.py)...`
-   - `✅ Reporte HTML compilado. Tiempo total: <el valor de "agent execution" que imprime build_report.py>`
+   - `✅ Reporte HTML compilado. Tiempo total: <the "agent execution" value printed by build_report.py>`
 
-### Selección Interactiva de Tablero y Sprint
+### Interactive Board and Sprint Selection
 1. Silently check `/memories/repo/` for a previously remembered Jira board/project key from an earlier run of this agent.
 2. If a board is remembered, query Jira for that board's active sprint plus the last 5 closed sprints, so they can be offered as quick-pick options.
 3. Ask both questions in one round:
@@ -73,42 +73,51 @@ From the 2026-09-09 "AI - Genesis Sync" meeting — confirm with the user if sta
 
 # Step 4 — Checklist Logic
 
-How to evaluate each Sprint DOD line:
+How to evaluate each Sprint DOD line (always request `summary`, `status`, `resolution`, `issuetype`, `assignee`, `customfield_10000`, and `customfield_10021`/sprint fields in Jira queries):
 
 1. **Sprint review meeting conducted**
    - Read the sprint's `goal` field (Sprint Goal in Jira). PASS only if it contains both a date and a URL/link (the agreed convention: date + recording link pasted into Sprint Goal after the review). If only some other free text is present, mark FAIL and list "add review date + recording link to Sprint Goal" as the missing action.
    - Do not try to validate meeting duration or PO attendance via Teams — the team explicitly decided this is not reliable/automatable; if a recording link exists, treat the review as conducted regardless of who attended.
-   - **Non-blocking quality signal** (never affects pass/fail): check whether the Sprint Goal (or a sprint-related comment) also has 2-3 short bullets describing concrete review findings beyond the date+link — e.g. what was accepted with reservations, feedback from the PO. If present, note it positively in `checks` (e.g. "El Sprint Goal también incluye 3 hallazgos concretos de la review: buena práctica."). If absent, queue one `practice` action (Step 5) suggesting to add them — do not fail the item for missing this.
+   - **Non-blocking quality signal** (never affects pass/fail): check whether the Sprint Goal (or a sprint-related comment) also has 2-3 short bullets describing concrete review findings beyond the date+link — e.g. what was accepted with reservations, feedback from the PO. If present, note it positively in `checks` (e.g. `"El Sprint Goal también incluye hallazgos concretos de la review (buena práctica)."`). If absent, queue one `practice` action (Step 5) suggesting to add them — do not fail the item for missing this.
 
 2. **Build used at sprint review kept until GA**
    - Mark as `manual` with `reason: "by-design"` (no Jenkins integration yet). The only action: confirm in Jenkins that an installer build tagged with this sprint's number exists.
    - Do not create an action about Artifactory vs Jenkins; add the informative notice described in Step 6 instead.
 
 3. **Stories accepted at review marked Closed in Jira**
-   - Get all issues in the sprint. Every Story/Task not in Closed is FAIL — report them grouped by current status.
-   - For every Closed issue, **read its changelog** (the issue "Activity → History" in Jira): fetch the issue with its change history (e.g. `expand: changelog`; if the primary tool does not return it, use `listJiraIssueChangelogs`). Find the last transition of the `status` field to Closed and record the author's display name and the date/time.
-   - The closure is valid if the author's normalized name matches the PO or PO Proxy (Step 3 — normalize both sides before comparing, so `leandro.gianotti`-style usernames are compared fairly). Otherwise flag it on the issue (`flags: ["cerrada por <nombre> (no es PO/PO Proxy)"]`) and list it in an action with who closed it and when. This is surfaced, not a hard fail, since the control is still being formalized.
-   - Only use `manual` for this sub-check if the changelog call actually fails; never ask the user to verify closers by hand when the history was readable.
-   - There is no hard deadline in the process today beyond "should be Closed by the Monday the next sprint opens" — do not fail purely on timing, just report any story left Resolved after that point as missing.
+   - Evaluate all issues in the sprint, grouped by **issue type** (`Story`, `Task`, `Sub-task`, and other types such as `Bug`, `Discussion`, etc.).
+   - Any issue not in `Closed` prevents this criterion from passing (`FAIL`). When `Resolved` or `Closed` issues have a non-delivery `resolution` (e.g., `Won't Do`, `Duplicate`, `Cannot Reproduce`, `Cancelled`), surface that resolution in `checks` and `flags` so auditors do not confuse discarded/duplicate items with pending functional deliverables.
+   - **Closure-author check (PO / PO Proxy) applies ONLY to `Story` issues**:
+     - For every **`Closed` `Story`**, read its changelog ("Activity -> History" in Jira; e.g. `expand: changelog`, or `listJiraIssueChangelogs` if the primary tool omits it). Find the last transition of the `status` field to `Closed` and record the author's display name and date/time.
+     - The closure is valid if the author's normalized name matches the PO (`Matt Miller`) or PO Proxy (`Vanesa Inés Savino`) (Step 3). Otherwise, flag it on the issue (`"Cerrada por <nombre> (no es PO ni PO Proxy)"`) and add a `fix` action naming who closed it and when.
+     - For **`Task`, `Sub-task`, `Bug`, `Discussion`, or any issue type other than `Story`**: if it was moved to `Closed` by another team member (dev/QA/SM), consider the closure author **valid (green)** — do **not** add an error flag and do **not** generate a `fix` action for who closed it.
+   - **Explicit breakdown by issue type when Criterion 3 is `fail`**:
+     - In `checks` ("Qué verificó el agente") and in `actions` (`fix`), explicitly break down what was checked and what must be corrected **for each issue type**:
+       - **User Stories (`Story`)**: how many are `Closed` (and whether closed by PO/PO Proxy), how many remain in other statuses, and what needs to be closed by PO/PO Proxy.
+       - **Tasks (`Task`)**: how many are `Closed` vs how many remain unclosed (explicitly noting that closures by dev/QA are valid for Tasks).
+       - **Sub-tasks (`Sub-task`)**: how many are `Closed` vs how many remain unclosed (explicitly noting that closures by dev/QA are valid for Sub-tasks).
+       - **Other types (`Bug`, `Discussion`, etc.)**: status breakdown and what should be regularized if applicable (including `resolution` context when relevant).
+   - Only use `manual` for the closure-author sub-check if the changelog call actually fails; never ask the user to verify closers by hand when history was readable.
 
 4. **Stories not closed deferred to next sprint or returned to product backlog**
-   - Para toda issue del sprint auditado (Sprint $N$) que no esté en estado `Closed`:
-     - Consultar en Jira a qué sprints pertenece (campo `sprint` / `customfield_xxxxx`). En Jira, las issues conservan el historial de sprints anteriores y suman los nuevos sprints a los que son asignadas.
-     - **Regla de Sprints Futuros (> al sprint analizado)**:
-       - Si una tarea no cerrada sigue asociada al Sprint $N$, pero **también está asignada a un sprint futuro** (cuyo número de sprint sea estrictamente mayor al analizado, p. ej. `Sprint M > N`), o si fue devuelta al **Backlog** (sin sprint activo):
-         - **Tomarla como OK (Cumple)**: La tarea no quedó colgada ni olvidada en el sprint cerrado; fue formalmente postergada/rollover a un sprint posterior o al backlog.
-     - **Evaluación y Veredicto del Criterio 4**:
-       - **PASS (`status: "pass"`)**: Si **todas** las issues no cerradas del sprint auditado están asignadas a un sprint futuro (> N) o al Backlog.
-       - **NO flaguear como incompleto el sprint**: El criterio debe salir en **color verde** (`status: "pass"`). No debe provocar que el resumen del sprint pase a fail.
-       - **Aviso visual con icono de warning en pequeño**: En el objeto del criterio dentro de `sections`, incluir el campo `warning` con el aviso correspondiente (p. ej. `warning: "<k> tareas abiertas postergadas al Sprint <M>"` o `<k> tareas abiertas postergadas a sprints futuros`). El renderer mostrará este aviso con una pastilla ámbar y el icono de warning `⚠️` junto al título del criterio en verde.
-       - En `note`: Explicar claramente en una frase el resultado: `"<k> tareas abiertas fueron postergadas al Sprint <M> (> N). El criterio cumple (verde) con aviso de postergación."`
-       - En `checks`: Detallar las verificaciones:
-         - `"Se revisaron las <k> issues no cerradas: todas están asignadas a un sprint futuro (Sprint <M> > <N>) o al backlog."`
-         - `"Ninguna issue quedó colgada exclusivamente en el Sprint <N> cerrado sin rollover ni backlog."`
-       - En `issues`: Listar los keys de las issues postergadas para poder navegar hacia ellas.
-       - En la tabla de issues (`issues`): Asignarles la flag `postergada a Sprint <M>` y categoría `status_category: "info"` o `"pass"` (no marcar como fail bloqueante).
-       - En `actions`: **NO generar acción de corrección (`fix`) bloqueante** para las tareas que ya están asignadas a un sprint futuro (> N), dado que ya fueron movidas.
-       - **FAIL (`status: "fail"`)**: ÚNICAMENTE si existen issues no cerradas que quedaron asociadas **exclusivamente** al Sprint $N$ cerrado, sin haber sido asignadas a ningún sprint futuro (> N) ni al backlog (tareas verdaderamente huérfanas en el sprint cerrado).
+   - Inspect every issue in the audited sprint (`Sprint N`) whose status is not `Closed`:
+   - Separate unclosed issues into **two distinct groups**:
+     1. **Finished work awaiting formal closure (`Resolved` or `Verified`)**:
+        - Issues in `Resolved` or `Verified` represent completed work waiting to be transitioned to `Closed` (covered by Criterion 3), NOT unfinished work that must be moved to the next sprint.
+        - Therefore, issues in `Resolved` or `Verified` that stayed in the closed sprint without a future sprint assigned:
+          - **Must NOT block** Criterion 4 or make it `fail`.
+          - **Must NOT generate blocking `fix` actions** under Criterion 4.
+          - Leave only a **non-blocking indication** in Criterion 4 (`note` / `checks` and `warning` when applicable) noting that they remain in `Resolved`/`Verified` awaiting formal closure under Criterion 3.
+          - In `issue-table`, assign `status_category: "info"` and a clear non-blocking flag (e.g. `"Pendiente de cierre formal (Criterio 3)"`, or with resolution context if `resolution` is not `Done`, e.g. `"Pendiente de cierre formal (resolución: Won't Do)"`).
+     2. **Active / unfinished statuses (`Open`, `In Progress`, `IN REVIEW`, `TESTING`, and any status other than `Closed`, `Resolved`, `Verified`)**:
+        - Read Jira's sprint history field (`customfield_10021` / `sprint`). In Jira, issues retain prior sprints and append new ones.
+        - **Future Sprint / Backlog Rollover (`M > N` or Backlog)**: if an active/unfinished issue is also assigned to a **future sprint** (sprint number strictly greater than `N`, e.g. `Sprint M > N`) or was returned to the **Backlog** (no active/future sprint), consider it **valid rollover (OK)**: do **not** generate a blocking `fix` action; in `issue-table`, set `status_category: "info"` and flag `"Postergada al Sprint <M>"` (or `"Devuelta al backlog"`).
+        - **Orphaned active work**: if an active/unfinished issue remained associated **exclusively with closed sprints (`<= N`)** with neither a future sprint (`> N`) nor Backlog, it is **blocking (`fail`)**: include it in Criterion 4's `issues`, generate a `fix` action, and in `issue-table` set `status_category: "fail"` with flag `"Sin pase a próximo sprint ni devolución al backlog"`.
+   - **Verdict for Criterion 4**:
+     - **PASS (`status: "pass"`, green)**: when **zero** active/unfinished issues remained orphaned in closed sprints (`<= N`). Never let `Resolved`/`Verified` items or future-sprint rollovers turn Criterion 4 red or make the sprint fail.
+     - **Warning pill (`warning` field)**: when active issues rolled over to future sprints (`> N`) and/or `Resolved`/`Verified` issues remain pending formal closure without rollover, include a concise Spanish `warning` string on Criterion 4 (rendered as a small amber `⚠️` pill next to the green title), e.g. `"<k> tareas activas postergadas a sprints futuros"` or `"<k> tareas activas postergadas; <r> terminadas esperan cierre"`.
+     - **FAIL (`status: "fail"`)**: ONLY when one or more issues in **active/unfinished** statuses (`Open`, `In Progress`, `IN REVIEW`, `TESTING`, etc.) remained stuck exclusively in closed sprints (`<= N`) without a future sprint (`> N`) or Backlog.
+   - In `issues` (on Criterion 4): include the orphaned active keys when `fail`, or the deferred active keys when `pass` with rollover so the reader can inspect them in the table.
 
 5. **Sprint retrospective conducted**
    - Search Confluence with `searchConfluence` (CQL `space = <space, default GRS> AND title = "Retrospective: Sprint <n>"`). PASS if exactly one current page/whiteboard is found; record its title, last-modified date and `url` in `checks`. FAIL if none is found. If more than one matches, list them and mark `manual` with `reason: "tool-unavailable"` asking the user to pick the right one.
@@ -116,16 +125,22 @@ How to evaluate each Sprint DOD line:
 
 6. **All PRs related to issues of the sprint are closed**
    - **Read `customfield_10000` ("Development") per issue, with whichever Jira MCP tool is actually connected** — try one issue first to confirm the field comes back before trusting the mechanism for the whole run:
-     - **Official Atlassian remote MCP** (`getJiraIssue` / `searchJiraIssuesUsingJql`): pass `fields: ["customfield_10000"]` (or add it to the JQL search's `fields` list to fetch it for every Story/Task in the sprint in one batched, paginated call — no need for one call per issue). The field comes back under `customFields.Development.value` as a stringified object; parse it for `pullrequest.overall` (`count`, `state`, `open`).
-     - **`@nexus2520/jira-mcp-server`** (tool names `jira_issues` / `jira_search`): `jira_issues` with `action: "get"`, `issueKey: <KEY>` returns the full issue including custom fields; or `jira_search` with `action: "issues"`, the sprint's JQL, and `fields` including the Development field, to batch the whole sprint.
+     - **Official Atlassian remote MCP** (`getJiraIssue` / `searchJiraIssuesUsingJql`): pass `fields: ["summary", "status", "resolution", "issuetype", "assignee", "customfield_10000", "customfield_10021"]` to fetch every sprint issue in batched paginated calls. The Development field comes back under `customFields.Development.value` as a stringified object; parse it for `pullrequest.overall` (`count`, `state`, `open`).
+     - **`@nexus2520/jira-mcp-server`** (`jira_issues` / `jira_search`): `jira_issues` with `action: "get"`, `issueKey: <KEY>` returns the full issue including custom fields; or `jira_search` with `action: "issues"`, the sprint's JQL, and the fields list above.
      - **Any other connected Jira MCP** (e.g. a local `mcp-atlassian`/"atlassian-intive" server): fetch one issue the same way and check whether the Development/PR data is present in the response. If it is not, mark item 6 `manual` with `reason: "tool-unavailable"` for this run — do not guess a tool-specific trick that was not verified.
    - Do **not** use a JQL smart clause such as `development[pullrequests].open > 0` — verified unsupported on this Jira site (Jira accepts it but silently drops it, returning unrelated issues; the response's `nextPageToken` decodes to `UNSUPPORTED_JQL_CLAUSES_IN_SHADOW`). Always read and parse `customfield_10000` directly instead.
-   - **Scope**: only Story/Task issues count for this check. PRs linked to Sub-tasks are not evaluated — traceability for this control is assessed at the Story/Task level only, per the team's own rule, not because subtasks are "optional".
+   - **Scope**: only `Story` and `Task` issues count for this check. PRs linked to `Sub-task`, `Bug`, or `Discussion` issues are not evaluated per team rule.
+   - **Pre-checks before requiring a merged PR or flagging missing PR on a `Story`/`Task`**:
+     1. **Valid delivery resolution (`Done`)**: check Jira's `resolution` field. If the ticket was resolved/closed with a resolution that does not imply code delivery (e.g., `Won't Do`, `Duplicate`, `Cannot Reproduce`, `Cancelled`, `Declined` — i.e., any populated resolution other than `Done`), **do NOT require a merged PR and do NOT flag it** for missing PR. Require a merged PR only when `resolution` is `Done` (or unset on an active non-deferred ticket).
+     2. **No future sprints assigned (`> N`)**: if the `Story`/`Task` has a future sprint (`> N`) assigned (meaning its work was deferred and is still ongoing in a later sprint), **do NOT fail or flag it for missing a merged PR**. **However**, if a deferred `Story`/`Task` has a linked PR still in **`OPEN`** status, **still fail and flag it** in Criterion 6 (no PR linked to the sprint may remain open).
+     3. **`SPIKE` exception**: if the ticket is a **`Task`** and its `summary` contains the word or prefix **`SPIKE`** (case-insensitive, e.g., `[SPIKE]`, `[SPIKE-UI]`, `SPIKE`, `Spike:`), **do NOT require an associated PR**.
    - **Item validation**:
-     - **FAIL** if any sprint Story/Task has a linked PR in **Open** status (`open: true` or `state` includes `OPEN`).
-     - **PASS** if every linked PR is **Merged** or **Declined**, and at least one is **Merged** (Declined PRs can coexist with Merged ones; a story with only Declined and zero Merged still fails).
-     - If a Closed Story/Task has no linked PRs at all, flag/report it as a finding (no evidence of delivered code).
-     - Only mark `manual` with `reason: "tool-unavailable"` if the field genuinely cannot be read with the connected tool (see above) or the call fails technically.
+     - **FAIL** if any sprint `Story`/`Task` (including deferred ones) has a linked PR in **Open** status (`open: true` or `state` includes `OPEN`).
+     - **FAIL** if any eligible non-deferred `Story`/`Task` (after applying the 3 pre-checks above) has **zero Merged PRs** — either no linked PRs at all, or only `DECLINED` PRs with 0 `MERGED`.
+     - **PASS** if there are zero `OPEN` PRs and every eligible non-deferred `Story`/`Task` has at least one `MERGED` PR.
+     - Only mark `manual` with `reason: "tool-unavailable"` if the Development field genuinely cannot be read with the connected tool or the call fails technically.
+   - **100% visibility rule**:
+     - Every single `Story`/`Task` that fails Criterion 6 (open PR, declined-only PR, or missing PR after exclusions) **MUST** be included in Criterion 6's `issues` array and in the corresponding `actions` (`fix`) `issues` arrays — **never omit or truncate keys** compared to the counts mentioned in `note`/`checks`, so clicking *"Ver issues afectadas"* reveals every affected ticket in the filtered table with its clear flag (`"Tiene PR abierto"`, `"PR declinado sin merge"`, `"Sin Pull Request vinculado"`).
 
 7. **Sprint completed in Jira**
    - PASS only if the sprint's `state` is `closed` in Jira. Otherwise FAIL.
@@ -137,14 +152,20 @@ How to evaluate each Sprint DOD line:
 Every item marked Manual or Fail in Step 4 must produce at least one clear, imperative action written for a non-technical reader (one sentence; say what to do, where, and why if it is not obvious). PASS items produce nothing unless Step 4 explicitly queues a `practice` suggestion for them. Use three groups:
 
 - `manual` — only what truly cannot be checked with the available tools: item 2 (confirm the installer build tagged with the sprint in Jenkins). Item 6 only if the connected Jira tool genuinely cannot return `customfield_10000` (see Step 4 item 6) — do not default it to manual. Item 3/5 only if their respective Jira/Confluence call failed.
-- `fix` — concrete corrections found in Jira or Confluence (issues not Closed, issues closed by someone who is not PO/PO Proxy, issues stuck exclusively in the closed sprint, create the missing retro whiteboard, close the sprint, add date + recording link to the Sprint Goal, open PRs or Stories/Tasks with no merged PR from item 6). No generar acciones `fix` para tareas del ítem 4 que ya estén en un sprint futuro (> N).
+- `fix` — concrete corrections found in Jira or Confluence:
+  - Criterion 3: issues not `Closed` (split into clear actions per issue type: `Story` — must be closed by PO/PO Proxy; `Task`; `Sub-task`; other types — noting any non-`Done` resolution context), and `Story` issues closed by someone other than PO/PO Proxy. Never generate `fix` actions for `Task`, `Sub-task`, or other non-`Story` issues closed by dev/QA.
+  - Criterion 4: only active/unfinished issues stuck exclusively in closed sprints (`<= N`) with no future sprint (`> N`) and no Backlog return. Never generate `fix` actions for issues rolled over to a future sprint (`> N`) or for `Resolved`/`Verified` issues waiting formal closure.
+  - Criterion 5: create the missing retro whiteboard.
+  - Criterion 6: open PRs (including on deferred `Story`/`Task` issues), `DECLINED`-only PRs with 0 merged, or eligible non-deferred `Story`/`Task` issues missing a merged PR (never include `SPIKE` Tasks or non-`Done` resolutions). Every affected key must be listed in `issues`.
+  - Criterion 7: close the sprint.
+  - Criterion 1: add date + recording link to the Sprint Goal.
 - `practice` — optional, non-blocking suggestions that improve quality signal but are not part of the DoD text. Exclude these from the "Acciones pendientes" KPI (Step 6) and from whatever determines DONE — they are extra credit, always shown, never required. Always include exactly these two, in this group:
   1. Only if Step 4 item 1 found no concrete findings bullets in the Sprint Goal/comment: `{ "criterion": "1", "text": "Sumar 2-3 bullets con hallazgos concretos de la review (qué se aceptó con reservas, feedback del PO) al Sprint Goal o a un comentario" }`.
   2. Always, regardless of the rest of the run's results: `{ "text": "Como buena práctica, correr el agente Software Health Check (SWH-ORCH, del Intive Playbook) sobre el código entregado en el sprint: analiza riesgo (FMEA), métricas y complejidad, seguridad/robustez, y deuda técnica, cada uno con su propio score — complementa la DoD con una señal real de calidad de código, no solo de proceso." }`.
 
 Never create actions for topics under definition with the client (e.g. Artifactory vs Jenkins); those go to `notices`.
 
-**Group repeated actions:** one action with an `issues` array, never one action per issue. Split by issue type when useful (e.g. one action for Stories/Tasks, one for Sub-tasks). Link each action to its DoD item with `criterion`.
+**Group repeated actions:** one action with an `issues` array, never one action per issue. Split by issue type when useful (e.g., separate actions for Stories, Tasks, and Sub-tasks). Link each action to its DoD item with `criterion`.
 
 The sprint is **DONE** once every action is checked off by a human (the HTML checklist stores progress locally).
 
@@ -155,25 +176,28 @@ The sprint is **DONE** once every action is checked off by a human (the HTML che
 Write the run as data following the contract of the `genesis-report-renderer` skill (`references/report-contract.md`). Never write HTML or a Markdown report.
 
 - Path: `reports/sprint-dod/<sprint-number>/report-data.json` (create folders if missing; overwrite if it exists).
-- `meta`: `agent_id: "sprint-dod"`, `agent_name: "Sprint DOD Validator"`, `agent_version: "2.6"`, `team: "AI Governance"`, `run_id: "sprint-dod-<n>-<YYYYMMDDTHHmm>"`, `generated_at` (ISO 8601 con offset; `started_at`, `execution_time_seconds` y `execution_time` los completa `build_report.py` desde el run clock del Step 1 — no los inventes), `language: "es"`, `scope: { type: "sprint", id: "<n>", label: "Sprint <n>", board: "<board name (id)>", project: "<key>" }`, `jira_base_url` (`https://<site>/browse/` of the Jira site used; omit if unknown).
+- `meta`: `agent_id: "sprint-dod"`, `agent_name: "Sprint DOD Validator"`, `agent_version: "2.7"`, `team: "AI Governance"`, `run_id: "sprint-dod-<n>-<YYYYMMDDTHHmm>"`, `generated_at` (ISO 8601 with offset; `started_at`, `execution_time_seconds`, and `execution_time` are populated automatically by `build_report.py` from the Step 1 run clock — do not invent them), `language: "es"`, `scope: { type: "sprint", id: "<n>", label: "Sprint <n>", board: "<board name (id)>", project: "<key>" }`, `jira_base_url` (`https://<site>/browse/` of the Jira site used; omit if unknown).
 - `meta.sources`: `Jira` (issues + changelog), `Confluence` (retro search), `Jenkins`, `Bitbucket/PRs`, each with `kind`, `status` (`ok | partial | unavailable | error`) and a user-friendly `reason` when not `ok`. Jira is `ok` unless a call failed. Confluence is `ok` whenever the retro search call succeeded (regardless of whether a page was found) and `error` only if the call itself failed. Jenkins is `unavailable` — no tool exists for it today. `Bitbucket/PRs` is `ok` whenever `customfield_10000` could be read with the connected Jira tool (see Step 4 item 6); mark it `unavailable` only if that connected tool does not return the field at all.
-- `summary`: `status` = `pass` if all 7 items pass, `fail` if any item fails, otherwise `warning`. Las tareas diferidas a sprints futuros evaluadas en el ítem 4 aprueban en verde y **no flaguean como incompleto el sprint**. `headline` one line (e.g. "El Sprint 183 todavía no cumple la Definition of Done"). `kpis`: `Ítems de la DoD aprobados` (value/7), `Issues cerradas` (value/total), `Acciones pendientes` (count of `manual`+`fix` actions only — never count `practice` actions here, `status: "fail"` if > 0).
+- `summary`: `status` = `pass` if all 7 items pass, `fail` if any item fails, otherwise `warning`. Active tasks deferred to future sprints and `Resolved`/`Verified` items awaiting formal closure do **not** fail Criterion 4 or flag the sprint as incomplete. `headline` one line (e.g. `"El Sprint 185 todavía no cumple la Definition of Done"`). `kpis`: `Ítems de la DoD aprobados` (value/7), `Issues cerradas` (value/total), `Acciones pendientes` (count of `manual`+`fix` actions only — never count `practice` actions here, `status: "fail"` if > 0).
 - `notices`: informative banners, no action required. Always include:
   `{ "level": "info", "title": "Dónde se guardan los instaladores (en definición)", "text": "La DoD dice que el instalador se guarda en Artifactory, pero hoy se guarda en Jenkins. Lo estamos definiendo con los PO de Genesis y, cuando la integración con Jenkins esté lista, este control se va a automatizar. Por ahora no tenés que hacer nada con esto." }`
 - `sections`, in this order:
   1. `{ "id": "sprint-dod", "type": "criteria", "title": "Sprint Definition of Done" }` — the 7 items of Step 2, each with:
      - `id` "1"…"7", `title` and `description` from the Step 2 table (verbatim).
      - `status` (`pass | fail | manual`); `reason` (`by-design | tool-unavailable`) for every `manual`.
-     - `warning`: (opcional) Si el ítem 4 tiene tareas abiertas postergadas a sprints futuros (> N), incluir aquí el texto del aviso (p. ej. `"<k> tareas abiertas postergadas al Sprint <M>"`).
-     - `note`: the result in one or two plain sentences, with the key numbers (e.g. "56 tareas abiertas fueron postergadas al Sprint 184 (> 183). El criterio cumple (verde) con aviso de postergación."). Max ~30 words. No jargon, no field names.
-     - `checks`: 2–4 short bullets saying what the agent looked at and what it found.
-     - optional `evidence` (JQL, raw field values — technical detail), `issues` (affected keys).
-  2. `{ "id": "issues", "type": "issue-table", "jql": "<query used>" }` — **all** sprint issues with `key`, `type`, `summary`, `status`, `assignee` (always request these fields; never leave summary/assignee out), `status_category` (`pass` Closed, `info` Resolved o postergadas a sprint futuro, `fail` any other incomplete status stuck in the closed sprint) and `flags` (e.g. `["postergada a Sprint 184"]`).
+     - `warning`: (optional) When Criterion 4 has active tasks rolled over to future sprints (`> N`) and/or `Resolved`/`Verified` items awaiting formal closure, include a concise non-blocking notice here (e.g. `"56 tareas activas postergadas a sprints futuros"` or `"76 tareas activas postergadas; 29 terminadas esperan cierre"`).
+     - `note`: the result in one or two plain Spanish sentences, with key numbers (max ~35 words). No technical jargon or Jira field IDs.
+     - `checks`: 2–5 clear Spanish bullets explaining in natural, business-friendly language what the agent verified and what it found (for Criterion 3 when failing, include the explicit breakdown per issue type: `Story`, `Task`, `Sub-task`, others). Never include raw field names (`customfield_10000`, `customfield_10021`, `dev-status`, `dev-info`) or cryptic shorthand (`Closed=46 | No-Closed=106`).
+     - optional `evidence` (only clear, meaningful references such as the Jira sprint query or Confluence retro URL — never dump cryptic pipe-separated internal tallies like `Closed=46 | No-Closed=106 | Deferred (>185): 76`), `issues` (affected keys — for Criterion 6, always include 100% of affected keys matching the counts in `note`/`checks`).
+  2. `{ "id": "issues", "type": "issue-table", "jql": "<query used>" }` — **all** sprint issues with `key`, `type`, `summary`, `status`, `resolution` (Jira resolution name, e.g. `"Done"`, `"Won't Do"`, `"Duplicate"`, or `"Sin resolución"` when null), `assignee` (always request these fields; never leave summary/resolution/assignee out), `status_category` (`pass` for `Closed`, `info` for `Resolved`/`Verified` or tasks deferred to a future sprint/backlog, `fail` only for active/unfinished tasks stuck in closed sprints without rollover or Stories closed by non-PO/PO Proxy), and `flags` (plain, self-explanatory Spanish tags, e.g. `"Postergada al Sprint 186"`, `"Pendiente de cierre formal (Criterio 3)"`, `"Cerrada por <nombre> (no es PO ni PO Proxy)"`, `"Sin pase a próximo sprint ni devolución al backlog"`, `"Tiene PR abierto"`, `"Sin Pull Request vinculado"` — never use opaque codes like `"sin rollover ni backlog"` or `"no-pr"`).
   3. `{ "id": "status-distribution", "type": "distribution" }` — count per Jira status (all statuses, so the total equals the number of issues).
 - `actions`: from Step 5 (`id`, `group`, `criterion`, `text`, optional `issues`).
-- `limitations`: only what really could not be verified in this run and why, in plain language (one line each). Do not repeat what is already in `notices`.
-- Only Jira metadata: never descriptions, comments or attachments.
-- Writing style: Spanish, friendly and clear for a PO/PM. Avoid internal jargon. Complete but no filler.
+- `limitations`: only what really could not be verified in this run and why, in plain Spanish (one line each). Do not repeat what is already in `notices`.
+- Only Jira metadata: never descriptions, comments, or attachments.
+- **Client-value writing standard (mandatory across the entire report)**:
+  - Every sentence, bullet, flag, and action must provide real, actionable value for a non-technical PO, PM, or client stakeholder.
+  - Eliminate raw field IDs (`customfield_10000`, `customfield_10021`), internal API names (`dev-status`, `dev-info`, `changelog`), opaque pipe-delimited summaries (`Closed=46 | No-Closed=106`), and abbreviated technical codes.
+  - The **"Qué verificó el agente" (`checks`)** section must read naturally in plain Spanish while preserving exact, auditable numbers and facts.
 
 ---
 
@@ -184,9 +208,9 @@ Load the `genesis-report-renderer` skill and follow its procedure. In short, fro
 ```bash
 python .claude/skills/genesis-report-renderer/scripts/build_report.py reports/sprint-dod/<n>/report-data.json
 ```
-(O `.github/skills/...`, `.claude/skills/...` o `.cursor/skills/...` según la plataforma de ejecución; son copias idénticas).
+(Or `.github/skills/...`, `.claude/skills/...`, or `.cursor/skills/...` depending on the runtime platform; they are identical copies).
 
-- Exit `0` → `reports/sprint-dod/<n>/report.html` was written. La última línea trae `agent execution: <total> (end-to-end)`: ese es el tiempo total real. Si aparece `WARN ... no run clock`, el Step 1 no inició el reloj.
+- Exit `0` → `reports/sprint-dod/<n>/report.html` was written. The last line shows `agent execution: <total> (end-to-end)`: that is the real total time. If `WARN ... no run clock` appears, Step 1 did not start the clock.
 - Exit `1` → fix only the JSON fields listed in the `ERROR` lines and run again (max 2 retries). Never change evaluated results to make it pass.
 - Exit `2` or Python not available → tell the user; the JSON remains the evidence of the run.
 
@@ -195,8 +219,8 @@ python .claude/skills/genesis-report-renderer/scripts/build_report.py reports/sp
 # Step 8 — Chat Reply (Concise) & Execution Time
 
 Reply briefly — do not repeat the report:
-- Overall status (🟢 DONE / 🟡 Pendiente / 🔴 No completo) and one line per DoD item (emoji + short label). Si el ítem 4 cumplió con tareas postergadas, indicarlo: "🟢 Lo que no se terminó se movió de sprint (Cumple con aviso: X tareas postergadas al Sprint Y)".
-- **Tiempo de ejecución total**: Mostrar de forma visible el tiempo total de punta a punta que imprimió `build_report.py` (`agent execution: ...`):
+- Overall status (🟢 DONE / 🟡 Pendiente / 🔴 No completo) and one line per DoD item (emoji + short label). If Criterion 4 passed with deferred tasks, note it: `"🟢 Lo que no se terminó se movió de sprint (Cumple con aviso: X tareas postergadas al Sprint Y)"`.
+- **Execution time**: visibly show the end-to-end total time printed by `build_report.py` (`agent execution: ...`):
   `⏱️ **Tiempo total de ejecución:** <total>`
 - Links to `report.html` and `report-data.json`.
 - How many actions remain (manual + fix) to reach DONE. Mention the `practice` suggestions separately, as optional, without counting them.

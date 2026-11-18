@@ -133,5 +133,5 @@ Every `status` field (criteria, items, sources excluded) uses one of:
 
 ## Size and privacy
 
-- Include only Jira metadata (key, type, summary, status, assignee). Never full descriptions or comments.
+- Include only Jira metadata (key, type, summary, status, resolution, assignee). Never full descriptions or comments.
 - Keep `summary` texts short. The HTML embeds the whole JSON.

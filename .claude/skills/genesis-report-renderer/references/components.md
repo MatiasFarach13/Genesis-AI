@@ -31,8 +31,9 @@ Jira issues with search, status/type filters, pagination and CSV export. **Colla
   "jql": "sprint = 1234",                         // optional: "Copiar JQL" button
   "rows": [
     { "key": "RSV1-28406", "type": "Story", "summary": "…", "status": "Resolved",
+      "resolution": "Done",                         // optional Jira resolution (e.g. "Done", "Won't Do", "Sin resolución")
       "status_category": "info",                   // pass | fail | manual | info | gap | na ... (badge color)
-      "assignee": "Marta S.", "parent": null, "flags": ["closed-by-non-po"] }
+      "assignee": "Marta S.", "parent": null, "flags": ["cerrada sin PO/PO Proxy"] }
   ] }
 ```
 

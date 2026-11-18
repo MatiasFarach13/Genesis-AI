@@ -26,11 +26,11 @@
       distribution_title: 'Distribución', gates_title: 'Umbrales', kv_title: 'Parámetros', table_title: 'Detalle',
       note: 'Nota', evidence: 'Evidencia', reason_by_design: 'Manual por diseño del proceso',
       reason_tool_unavailable: 'Manual porque la herramienta/integración no está disponible',
-      affected_issues: 'Ver issues afectadas', search: 'Buscar KEY, resumen o asignado…',
-      all_statuses: 'Todos los estados', all_types: 'Todos los tipos', export_csv: 'CSV', copy_jql: 'Copiar JQL',
+      affected_issues: 'Ver issues afectadas', search: 'Buscar KEY, resumen, resolución o asignado…',
+      all_statuses: 'Todos los estados', all_types: 'Todos los tipos', all_resolutions: 'Todas las resoluciones', export_csv: 'CSV', copy_jql: 'Copiar JQL',
       copied: 'Copiado', showing: '{from}–{to} de {total}', prev: 'Anterior', next: 'Siguiente',
       no_results: 'Sin resultados', filtered_by: 'Filtrado por', clear_filter: 'Quitar filtro',
-      col_key: 'KEY', col_type: 'Tipo', col_summary: 'Resumen', col_status: 'Estado', col_assignee: 'Asignado',
+      col_key: 'KEY', col_type: 'Tipo', col_summary: 'Resumen', col_status: 'Estado', col_resolution: 'Resolución', col_assignee: 'Asignado',
       actions_title: 'Plan de acción', completed: '{p}% completado ({n}/{total})', issues_count: '{n} issues',
       criterion_ref: 'Criterio {id}', sources_title: 'Cobertura y fuentes', limitations: 'Limitaciones',
       source_ok: 'OK', source_partial: 'Parcial', source_unavailable: 'No disp.', source_error: 'Error',
@@ -52,11 +52,11 @@
       distribution_title: 'Distribution', gates_title: 'Thresholds', kv_title: 'Parameters', table_title: 'Details',
       note: 'Note', evidence: 'Evidence', reason_by_design: 'Manual by process design',
       reason_tool_unavailable: 'Manual because the tool/integration is unavailable',
-      affected_issues: 'Show affected issues', search: 'Search KEY, summary or assignee…',
-      all_statuses: 'All statuses', all_types: 'All types', export_csv: 'CSV', copy_jql: 'Copy JQL',
+      affected_issues: 'Show affected issues', search: 'Search KEY, summary, resolution or assignee…',
+      all_statuses: 'All statuses', all_types: 'All types', all_resolutions: 'All resolutions', export_csv: 'CSV', copy_jql: 'Copy JQL',
       copied: 'Copied', showing: '{from}–{to} of {total}', prev: 'Previous', next: 'Next',
       no_results: 'No results', filtered_by: 'Filtered by', clear_filter: 'Clear filter',
-      col_key: 'KEY', col_type: 'Type', col_summary: 'Summary', col_status: 'Status', col_assignee: 'Assignee',
+      col_key: 'KEY', col_type: 'Type', col_summary: 'Summary', col_status: 'Status', col_resolution: 'Resolution', col_assignee: 'Assignee',
       actions_title: 'Action plan', completed: '{p}% completed ({n}/{total})', issues_count: '{n} issues',
       criterion_ref: 'Criterion {id}', sources_title: 'Coverage and sources', limitations: 'Limitations',
       source_ok: 'OK', source_partial: 'Partial', source_unavailable: 'N/A', source_error: 'Error',
@@ -341,20 +341,29 @@
   const select = (allLabel, options, onChange) => el('select', { class: 'select', 'aria-label': allLabel, onchange: (e) => onChange(e.target.value) },
     el('option', { value: '' }, allLabel), options.map((o) => el('option', { value: o }, o)));
 
-  const issueRow = (r) => el('tr', null,
-    el('td', null, issueLink(r.key)),
-    el('td', null, el('span', { class: 'type-cell' }, el('span', { class: 'type-dot', 'data-type': slug(r.type) }), r.type || '—')),
-    el('td', { class: 'summary-cell', title: r.summary || '' }, r.summary || el('span', { class: 'muted' }, '—'),
-      (Array.isArray(r.flags) ? r.flags : []).map((f) => el('span', { class: 'flag' }, String(f)))),
-    el('td', null, badge(r.status_category, r.status || t(`status_${normStatus(r.status_category)}`))),
-    el('td', null, r.assignee
-      ? el('span', { class: 'assignee' }, el('span', { class: 'avatar' }, initials(r.assignee)), r.assignee)
-      : el('span', { class: 'muted' }, '—')));
+  const issueRow = (r) => {
+    const flags = Array.isArray(r.flags) ? r.flags.filter(Boolean) : [];
+    const summaryTitle = [r.summary, ...flags].filter(Boolean).join(' · ');
+    return el('tr', null,
+      el('td', null, issueLink(r.key)),
+      el('td', null, el('span', { class: 'type-cell' }, el('span', { class: 'type-dot', 'data-type': slug(r.type) }), r.type || '—')),
+      el('td', { class: 'summary-cell', title: summaryTitle },
+        r.summary ? el('div', { class: 'summary-text' }, r.summary) : el('span', { class: 'muted' }, '—'),
+        flags.length ? el('div', { class: 'flag-list' }, flags.map((f) => el('span', { class: 'flag' }, String(f)))) : null),
+      el('td', null, badge(r.status_category, r.status || t(`status_${normStatus(r.status_category)}`))),
+      el('td', { class: 'resolution-cell' }, r.resolution
+        ? el('span', { class: 'res-pill', 'data-res': slug(r.resolution) }, r.resolution)
+        : el('span', { class: 'muted' }, '—')),
+      el('td', null, r.assignee
+        ? el('span', { class: 'assignee' }, el('span', { class: 'avatar' }, initials(r.assignee)), r.assignee)
+        : el('span', { class: 'muted' }, '—')));
+  };
 
   const renderIssueTable = (sec) => {
     const rows = (sec.rows || []).filter((r) => r && r.key);
     const uniqSorted = (key) => [...new Set(rows.map((r) => r[key]).filter(Boolean))].sort();
-    const state = { q: '', status: '', type: '', keys: null, keysLabel: '', page: 0, printAll: false };
+    const resolutions = uniqSorted('resolution');
+    const state = { q: '', status: '', type: '', resolution: '', keys: null, keysLabel: '', page: 0, printAll: false };
 
     const tbody = el('tbody');
     const pager = el('div', { class: 'pager' });
@@ -365,9 +374,10 @@
     });
 
     const filtered = () => rows.filter((r) =>
-      (!state.q || [r.key, r.summary, r.assignee].some((v) => String(v || '').toLowerCase().includes(state.q)))
+      (!state.q || [r.key, r.summary, r.resolution, r.assignee].some((v) => String(v || '').toLowerCase().includes(state.q)))
       && (!state.status || r.status === state.status)
       && (!state.type || r.type === state.type)
+      && (!state.resolution || r.resolution === state.resolution)
       && (!state.keys || state.keys.has(r.key)));
 
     const update = () => {
@@ -378,7 +388,7 @@
       const start = state.page * size;
       const slice = list.slice(start, start + size);
       tbody.replaceChildren(...(slice.length ? slice.map(issueRow)
-        : [el('tr', null, el('td', { class: 'empty', colspan: 5 }, t('no_results')))]));
+        : [el('tr', null, el('td', { class: 'empty', colspan: 6 }, t('no_results')))]));
       chip.hidden = !state.keys;
       chip.replaceChildren(...(state.keys ? [
         `${t('filtered_by')}: ${state.keysLabel}`,
@@ -395,16 +405,17 @@
       el('label', { class: 'search' }, icon('search'), searchInput),
       select(t('all_statuses'), uniqSorted('status'), (v) => { state.status = v; state.page = 0; update(); }),
       select(t('all_types'), uniqSorted('type'), (v) => { state.type = v; state.page = 0; update(); }),
+      resolutions.length ? select(t('all_resolutions'), resolutions, (v) => { state.resolution = v; state.page = 0; update(); }) : null,
       el('button', {
         class: 'btn btn-sm', type: 'button',
         onclick: () => downloadCsv(`${meta.run_id || 'report'}-${sec.id || 'issues'}.csv`,
-          ['key', 'type', 'summary', 'status', 'assignee'],
-          filtered().map((r) => [r.key, r.type, r.summary, r.status, r.assignee]))
+          ['key', 'type', 'summary', 'status', 'resolution', 'assignee'],
+          filtered().map((r) => [r.key, r.type, r.summary, r.status, r.resolution || '', r.assignee]))
       }, icon('download'), el('span', null, t('export_csv'))),
       sec.jql ? el('button', { class: 'btn btn-sm', type: 'button', onclick: (e) => copyText(sec.jql, e.currentTarget) }, icon('copy'), el('span', null, t('copy_jql'))) : null);
 
     const content = el('div', null, chip, el('div', { class: 'table-wrap' }, el('table', null,
-      el('thead', null, el('tr', null, ['col_key', 'col_type', 'col_summary', 'col_status', 'col_assignee'].map((c) => el('th', null, t(c))))),
+      el('thead', null, el('tr', null, ['col_key', 'col_type', 'col_summary', 'col_status', 'col_resolution', 'col_assignee'].map((c) => el('th', null, t(c))))),
       tbody)), pager);
     const toggleLabel = el('span');
     const toggle = el('button', { class: 'btn btn-sm toggle', type: 'button', onclick: () => setCollapsed(!collapsed) }, icon('chevron', 'chev'), toggleLabel);
