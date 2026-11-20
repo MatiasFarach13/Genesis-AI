@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 AGENT_ID = "story-dod"
 AGENT_NAME = "User Story DoD Validator"
-AGENT_VERSION = "1.2.0"
+AGENT_VERSION = "1.3.0"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -545,8 +545,36 @@ def extract_acceptance_criteria(desc_text: str) -> List[Dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Credentials & Config Discovery
+# Credentials, .env & Multi-IDE MCP Config Discovery
 # ---------------------------------------------------------------------------
+
+def _parse_dotenv(path: Path) -> Dict[str, str]:
+    """Parse a standard .env file (KEY=VALUE, optional 'export ', quotes, # comments) using stdlib only."""
+    env_map: Dict[str, str] = {}
+    if not path.is_file():
+        return env_map
+    try:
+        for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip()
+            if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+                val = val[1:-1]
+            elif " #" in val:
+                val = val.split(" #", 1)[0].strip()
+            if key and val:
+                env_map[key] = val
+    except Exception:
+        pass
+    return env_map
+
 
 def discover_credentials(
     cli_jira_url: Optional[str] = None,
@@ -554,14 +582,44 @@ def discover_credentials(
     cli_jira_token: Optional[str] = None,
     cli_zephyr_token: Optional[str] = None,
 ) -> Dict[str, Optional[str]]:
+    # 1. Load .env.local and .env from current working directory, workspace root, or parent workspace
+    dotenv_vars: Dict[str, str] = {}
+    candidate_roots: List[Path] = []
+    for root in (Path.cwd(), WORKSPACE_ROOT, WORKSPACE_ROOT.parent):
+        try:
+            resolved = root.resolve()
+            if resolved not in candidate_roots:
+                candidate_roots.append(resolved)
+        except Exception:
+            pass
+    for root in reversed(candidate_roots):
+        for fname in (".env", ".env.local"):
+            dotenv_vars.update(_parse_dotenv(root / fname))
+
+    def _is_valid_cred(val: Any) -> bool:
+        if not val or not isinstance(val, str):
+            return False
+        s = val.strip()
+        if not s or "${" in s or "$(" in s or s.startswith("<") or "your_api_token" in s.lower() or "tu_token" in s.lower():
+            return False
+        return True
+
+    def _get_var(*names: str) -> Optional[str]:
+        for n in names:
+            for v in (os.environ.get(n), dotenv_vars.get(n)):
+                if _is_valid_cred(v):
+                    return str(v).strip()
+        return None
+
     creds: Dict[str, Optional[str]] = {
-        "jira_base_url": cli_jira_url or os.environ.get("JIRA_BASE_URL"),
-        "jira_email": cli_jira_email or os.environ.get("JIRA_EMAIL"),
-        "jira_api_token": cli_jira_token or os.environ.get("JIRA_API_TOKEN"),
-        "zephyr_api_token": cli_zephyr_token or os.environ.get("ZEPHYR_API_TOKEN"),
-        "zephyr_base_url": os.environ.get("ZEPHYR_BASE_URL", "https://api.zephyrscale.smartbear.com/v2"),
+        "jira_base_url": cli_jira_url or _get_var("JIRA_BASE_URL", "JIRA_URL"),
+        "jira_email": cli_jira_email or _get_var("JIRA_EMAIL", "JIRA_USERNAME"),
+        "jira_api_token": cli_jira_token or _get_var("JIRA_API_TOKEN"),
+        "zephyr_api_token": cli_zephyr_token or _get_var("ZEPHYR_API_TOKEN"),
+        "zephyr_base_url": _get_var("ZEPHYR_BASE_URL") or "https://api.zephyrscale.smartbear.com/v2",
     }
 
+    # 2. Check repo memory (story-dod.json)
     story_mem = MEMORIES_DIR / "story-dod.json"
     if story_mem.is_file():
         try:
@@ -573,25 +631,411 @@ def discover_credentials(
         except Exception:
             pass
 
-    mcp_cfg_path = Path.home() / ".gemini" / "config" / "mcp_config.json"
-    if mcp_cfg_path.is_file():
+    # 3. Scan MCP config files across Cursor, Claude Code, VS Code, and Antigravity
+    home = Path.home()
+    mcp_config_paths: List[Path] = [
+        home / ".cursor" / "mcp.json",
+        WORKSPACE_ROOT / ".cursor" / "mcp.json",
+        WORKSPACE_ROOT.parent / ".cursor" / "mcp.json",
+        WORKSPACE_ROOT / ".mcp.json",
+        WORKSPACE_ROOT.parent / ".mcp.json",
+        home / ".claude.json",
+        WORKSPACE_ROOT / ".vscode" / "mcp.json",
+        WORKSPACE_ROOT.parent / ".vscode" / "mcp.json",
+        home / ".gemini" / "config" / "mcp_config.json",
+    ]
+    seen_cfg: Set[Path] = set()
+    for cfg_path in mcp_config_paths:
         try:
-            mcp_data = json.loads(mcp_cfg_path.read_text(encoding="utf-8"))
-            jira_env = ((mcp_data.get("mcpServers") or {}).get("jira") or {}).get("env") or {}
-            if not creds["jira_base_url"]:
-                creds["jira_base_url"] = jira_env.get("JIRA_BASE_URL")
-            if not creds["jira_email"]:
-                creds["jira_email"] = jira_env.get("JIRA_EMAIL")
-            if not creds["jira_api_token"]:
-                creds["jira_api_token"] = jira_env.get("JIRA_API_TOKEN")
-            if not creds["zephyr_api_token"]:
-                creds["zephyr_api_token"] = jira_env.get("ZEPHYR_API_TOKEN")
+            resolved_cfg = cfg_path.resolve()
+        except Exception:
+            resolved_cfg = cfg_path
+        if resolved_cfg in seen_cfg or not cfg_path.is_file():
+            continue
+        seen_cfg.add(resolved_cfg)
+        try:
+            mcp_data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+            if not isinstance(mcp_data, dict):
+                continue
+            servers_map: Dict[str, Any] = {}
+            for section_key in ("mcpServers", "servers"):
+                sec = mcp_data.get(section_key)
+                if isinstance(sec, dict):
+                    servers_map.update(sec)
+            for srv_cfg in servers_map.values():
+                if not isinstance(srv_cfg, dict):
+                    continue
+                srv_env = srv_cfg.get("env")
+                if not isinstance(srv_env, dict):
+                    continue
+                if not creds["jira_base_url"]:
+                    cand_url = srv_env.get("JIRA_BASE_URL") or srv_env.get("JIRA_URL")
+                    if _is_valid_cred(cand_url):
+                        creds["jira_base_url"] = str(cand_url).strip()
+                if not creds["jira_email"]:
+                    cand_email = srv_env.get("JIRA_EMAIL") or srv_env.get("JIRA_USERNAME")
+                    if _is_valid_cred(cand_email):
+                        creds["jira_email"] = str(cand_email).strip()
+                if not creds["jira_api_token"]:
+                    cand_tok = srv_env.get("JIRA_API_TOKEN")
+                    if _is_valid_cred(cand_tok):
+                        creds["jira_api_token"] = str(cand_tok).strip()
+                if not creds["zephyr_api_token"]:
+                    cand_ztok = srv_env.get("ZEPHYR_API_TOKEN")
+                    if _is_valid_cred(cand_ztok):
+                        creds["zephyr_api_token"] = str(cand_ztok).strip()
+                cand_zurl = srv_env.get("ZEPHYR_BASE_URL")
+                if _is_valid_cred(cand_zurl) and creds["zephyr_base_url"] == "https://api.zephyrscale.smartbear.com/v2":
+                    creds["zephyr_base_url"] = str(cand_zurl).strip()
         except Exception:
             pass
 
     if creds["jira_base_url"]:
         creds["jira_base_url"] = creds["jira_base_url"].rstrip("/")
+    else:
+        creds["jira_base_url"] = "https://genesissoftwareinnovations.atlassian.net"
     return creds
+
+
+# ---------------------------------------------------------------------------
+# Multi-MCP Issue & PR Payload Normalizers
+# ---------------------------------------------------------------------------
+
+def _unwrap_customfield_val(val: Any) -> Any:
+    """Unwrap mcp-atlassian / Atlassian Remote MCP {'name': ..., 'value': ...} wrapper."""
+    if isinstance(val, dict) and "value" in val and set(val.keys()).issubset({"name", "value", "id", "type"}):
+        return val.get("value")
+    return val
+
+
+def normalize_dev_info_prs(dev_data: Any) -> List[dict]:
+    """Normalize Bitbucket PR payloads from Jira dev-status REST, mcp-atlassian
+    (jira_get_issue_development_info), or Atlassian Remote MCP v2 (bitbucketPullRequest)."""
+    if not dev_data:
+        return []
+    raw_prs: List[dict] = []
+    if isinstance(dev_data, list):
+        raw_prs = [p for p in dev_data if isinstance(p, dict)]
+    elif isinstance(dev_data, dict):
+        if isinstance(dev_data.get("detail"), list):
+            for det in dev_data["detail"]:
+                if isinstance(det, dict):
+                    for pr in det.get("pullRequests") or []:
+                        if isinstance(pr, dict):
+                            raw_prs.append(pr)
+        for list_key in ("pullRequests", "pull_requests", "prs", "values", "data"):
+            cand = dev_data.get(list_key)
+            if isinstance(cand, list) and not raw_prs:
+                raw_prs = [p for p in cand if isinstance(p, dict)]
+        if not raw_prs and ("id" in dev_data or "state" in dev_data or "status" in dev_data):
+            raw_prs = [dev_data]
+
+    normalized: List[dict] = []
+    for p in raw_prs:
+        pr_id = p.get("id") or p.get("number") or p.get("pr_id") or "?"
+        status = str(p.get("status") or p.get("state") or "UNKNOWN").upper()
+        repo_obj = p.get("repository") or p.get("destination", {}).get("repository")
+        repo_name = (
+            p.get("repositoryName")
+            or p.get("repository_name")
+            or (repo_obj.get("name") or repo_obj.get("full_name") if isinstance(repo_obj, dict) else repo_obj)
+            or "Bitbucket"
+        )
+        author_raw = p.get("author") or p.get("user") or {}
+        if isinstance(author_raw, str):
+            author_obj = {"name": author_raw}
+        elif isinstance(author_raw, dict):
+            author_obj = {
+                "name": (
+                    author_raw.get("name")
+                    or author_raw.get("display_name")
+                    or author_raw.get("displayName")
+                    or author_raw.get("nickname")
+                    or "Unknown"
+                )
+            }
+        else:
+            author_obj = {"name": "Unknown"}
+
+        dest_raw = p.get("destination") or {}
+        if isinstance(dest_raw, dict):
+            branch_raw = dest_raw.get("branch")
+            if isinstance(branch_raw, dict):
+                dest_branch = str(branch_raw.get("name") or "master")
+            else:
+                dest_branch = str(branch_raw or p.get("destination_branch") or "master")
+        else:
+            dest_branch = str(p.get("destination_branch") or "master")
+
+        reviewers: List[dict] = []
+        raw_revs = p.get("reviewers") or p.get("participants") or []
+        for r in raw_revs:
+            if not isinstance(r, dict):
+                continue
+            user_sub = r.get("user") if isinstance(r.get("user"), dict) else {}
+            r_name = (
+                r.get("name")
+                or r.get("display_name")
+                or r.get("displayName")
+                or user_sub.get("display_name")
+                or user_sub.get("displayName")
+                or user_sub.get("name")
+                or user_sub.get("nickname")
+                or ""
+            )
+            r_approved = bool(
+                r.get("approved") is True
+                or str(r.get("status") or r.get("state") or "").upper() == "APPROVED"
+            )
+            if r_name:
+                reviewers.append({"name": str(r_name), "approved": r_approved})
+
+        normalized.append({
+            "id": str(pr_id).lstrip("#"),
+            "status": status,
+            "repositoryName": str(repo_name),
+            "author": author_obj,
+            "reviewers": reviewers,
+            "destination": {"branch": dest_branch},
+            "commentCount": int(p.get("commentCount") or p.get("comment_count") or 0),
+            "url": str(p.get("url") or ((p.get("links") or {}).get("html") or {}).get("href") or ""),
+        })
+    return normalized
+
+
+def parse_cf_10000_summary(cf_val: Any) -> Dict[str, Any]:
+    """Parse Jira's customfield_10000 (Development summary string) to extract PR counts and state."""
+    raw = str(_unwrap_customfield_val(cf_val) or "")
+    info: Dict[str, Any] = {
+        "has_prs": False,
+        "count": 0,
+        "state": None,
+        "open_count": 0,
+        "merged_count": 0,
+        "declined_count": 0,
+        "last_updated": None,
+    }
+    if "pullrequest=" not in raw and "pullrequest" not in raw.lower():
+        return info
+
+    # Look for pullrequest={dataType=pullrequest, state=MERGED, stateCount=1} or JSON summary inside cf_10000
+    m_pr_block = re.search(r"pullrequest=\{([^{}]*)\}", raw)
+    block = m_pr_block.group(1) if m_pr_block else raw
+    m_count = re.search(r"stateCount=(\d+)", block)
+    m_state = re.search(r"state=([A-Z_]+)", block)
+    count = int(m_count.group(1)) if m_count else 0
+    state = m_state.group(1).upper() if m_state else None
+
+    # Also support JSON-encoded pullrequest summary inside customfield_10000
+    if count == 0 and '"pullrequest"' in raw:
+        m_json_count = re.search(r'"pullrequest"\s*:\s*\{[^}]*"count"\s*:\s*(\d+)', raw)
+        m_json_state = re.search(r'"pullrequest"\s*:\s*\{[^}]*"state"\s*:\s*"([A-Za-z_]+)"', raw)
+        if m_json_count:
+            count = int(m_json_count.group(1))
+        if m_json_state:
+            state = m_json_state.group(1).upper()
+
+    m_upd = re.search(r"lastUpdated=([0-9T:\-+.]+)", raw)
+    if m_upd:
+        info["last_updated"] = m_upd.group(1)[:10]
+
+    if count > 0:
+        info["has_prs"] = True
+        info["count"] = count
+        info["state"] = state or "UNKNOWN"
+        if state == "MERGED":
+            info["merged_count"] = count
+        elif state == "OPEN":
+            info["open_count"] = count
+        elif state == "DECLINED":
+            info["declined_count"] = count
+    return info
+
+
+def normalize_issue_payload(raw_issue: dict) -> dict:
+    """Normalize Jira issue payloads across all 3 MCP schemas into Jira REST v3 shape:
+      1. Standard Jira REST v3 / jira-nexus (`fields.*`, `changelog.histories`)
+      2. mcp-atlassian (`jira_get_issue` flat root dict with `issue_type`, `comments`, `changelogs`, `inward_issue`/`outward_issue`, `customfield_*.value`)
+      3. Atlassian Remote MCP v1/v2 (`getJiraIssue` with `fields` or `customFields.Development`/`Design`)
+    """
+    if not isinstance(raw_issue, dict):
+        return {}
+
+    # Unwrap common top-level envelopes if an MCP wraps the issue under {"issue": ...} or {"data": ...}
+    if "key" not in raw_issue:
+        for wrap_key in ("issue", "data", "result"):
+            inner = raw_issue.get(wrap_key)
+            if isinstance(inner, dict) and inner.get("key"):
+                raw_issue = inner
+                break
+
+    raw_fields = raw_issue.get("fields")
+    fields: Dict[str, Any] = dict(raw_fields) if isinstance(raw_fields, dict) else {}
+
+    # Merge top-level flat fields from mcp-atlassian when missing in `fields`
+    for k, v in raw_issue.items():
+        if k in ("id", "key", "self", "expand", "fields", "changelog", "changelogs", "comments", "remote_links", "development_info", "prs"):
+            continue
+        if k not in fields or fields[k] is None:
+            fields[k] = v
+
+    # Normalize customFields dict from Atlassian Remote MCP v1/v2 if present
+    for cf_container_key in ("customFields", "custom_fields", "names"):
+        cf_container = raw_issue.get(cf_container_key) or fields.get(cf_container_key)
+        if isinstance(cf_container, dict):
+            for cf_k, cf_v in cf_container.items():
+                cf_k_low = str(cf_k).strip().lower()
+                unwrapped = _unwrap_customfield_val(cf_v)
+                if cf_k_low in ("development", "customfield_10000") and not fields.get("customfield_10000"):
+                    fields["customfield_10000"] = unwrapped
+                elif cf_k_low in ("design", "customfield_10086") and not fields.get("customfield_10086"):
+                    fields["customfield_10086"] = unwrapped
+                elif str(cf_k).startswith("customfield_") and not fields.get(cf_k):
+                    fields[cf_k] = unwrapped
+
+    # Unwrap {"name": ..., "value": ...} on all customfield_* keys (mcp-atlassian format)
+    for fk in list(fields.keys()):
+        if str(fk).startswith("customfield_"):
+            fields[fk] = _unwrap_customfield_val(fields[fk])
+
+    # Normalize issuetype vs issue_type
+    if not fields.get("issuetype") and fields.get("issue_type"):
+        it_val = fields["issue_type"]
+        fields["issuetype"] = {"name": it_val} if isinstance(it_val, str) else it_val
+    elif isinstance(fields.get("issuetype"), str):
+        fields["issuetype"] = {"name": fields["issuetype"]}
+
+    # Normalize status & resolution if they are plain strings
+    if isinstance(fields.get("status"), str):
+        fields["status"] = {"name": fields["status"]}
+    if isinstance(fields.get("resolution"), str):
+        fields["resolution"] = {"name": fields["resolution"]}
+
+    # Normalize assignee (`display_name` -> `displayName`)
+    assignee = fields.get("assignee")
+    if isinstance(assignee, str):
+        fields["assignee"] = {"displayName": assignee}
+    elif isinstance(assignee, dict) and not assignee.get("displayName"):
+        disp = assignee.get("display_name") or assignee.get("name") or assignee.get("email")
+        if disp:
+            fields["assignee"] = dict(assignee, displayName=disp)
+
+    # Normalize comments (`comments` list at root or `fields.comments` -> `fields.comment.comments`)
+    raw_comments = raw_issue.get("comments") or fields.get("comments")
+    if isinstance(raw_comments, list) and not ((fields.get("comment") or {}).get("comments")):
+        fields["comment"] = {"comments": raw_comments}
+
+    # Normalize issuelinks (`inward_issue`/`outward_issue` and flat linked issue fields -> Jira REST v3 shape)
+    norm_links: List[dict] = []
+    for link in fields.get("issuelinks") or []:
+        if not isinstance(link, dict):
+            continue
+        link_copy = dict(link)
+        for snake_dir, camel_dir in (("outward_issue", "outwardIssue"), ("inward_issue", "inwardIssue")):
+            target = link_copy.get(camel_dir) or link_copy.get(snake_dir)
+            if isinstance(target, dict):
+                t_copy = dict(target)
+                t_fields = dict(t_copy.get("fields") or {})
+                for tk in ("summary", "status", "priority", "issuetype", "issue_type"):
+                    if tk not in t_fields and tk in t_copy:
+                        t_fields[tk] = t_copy[tk]
+                if not t_fields.get("issuetype") and t_fields.get("issue_type"):
+                    it_v = t_fields["issue_type"]
+                    t_fields["issuetype"] = {"name": it_v} if isinstance(it_v, str) else it_v
+                for obj_k in ("status", "priority", "issuetype"):
+                    if isinstance(t_fields.get(obj_k), str):
+                        t_fields[obj_k] = {"name": t_fields[obj_k]}
+                t_copy["fields"] = t_fields
+                link_copy[camel_dir] = t_copy
+        norm_links.append(link_copy)
+    if norm_links:
+        fields["issuelinks"] = norm_links
+
+    # Normalize subtasks (support flat subtasks or `fields` wrapper, plus assignee/resolution)
+    norm_subtasks: List[dict] = []
+    for st in fields.get("subtasks") or []:
+        if not isinstance(st, dict):
+            continue
+        st_copy = dict(st)
+        st_fields = dict(st_copy.get("fields") or {})
+        for sk in ("summary", "status", "resolution", "assignee", "issuetype", "issue_type"):
+            if sk not in st_fields and sk in st_copy:
+                st_fields[sk] = st_copy[sk]
+        for obj_k in ("status", "resolution", "issuetype"):
+            if isinstance(st_fields.get(obj_k), str):
+                st_fields[obj_k] = {"name": st_fields[obj_k]}
+        st_ass = st_fields.get("assignee")
+        if isinstance(st_ass, str):
+            st_fields["assignee"] = {"displayName": st_ass}
+        elif isinstance(st_ass, dict) and not st_ass.get("displayName"):
+            st_disp = st_ass.get("display_name") or st_ass.get("name")
+            if st_disp:
+                st_fields["assignee"] = dict(st_ass, displayName=st_disp)
+        st_copy["fields"] = st_fields
+        norm_subtasks.append(st_copy)
+    if norm_subtasks:
+        fields["subtasks"] = norm_subtasks
+
+    # Normalize changelog (`changelogs` list with `display_name` & `to_string` -> `changelog.histories`)
+    changelog = raw_issue.get("changelog")
+    raw_histories: List[dict] = []
+    if isinstance(changelog, dict) and isinstance(changelog.get("histories"), list):
+        raw_histories = changelog["histories"]
+    elif isinstance(raw_issue.get("changelogs"), list):
+        raw_histories = raw_issue["changelogs"]
+    elif isinstance(fields.get("changelogs"), list):
+        raw_histories = fields["changelogs"]
+
+    norm_histories: List[dict] = []
+    for h in raw_histories:
+        if not isinstance(h, dict):
+            continue
+        h_copy = dict(h)
+        h_author = h_copy.get("author")
+        if isinstance(h_author, str):
+            h_copy["author"] = {"displayName": h_author}
+        elif isinstance(h_author, dict) and not h_author.get("displayName"):
+            h_disp = h_author.get("display_name") or h_author.get("name") or h_author.get("email")
+            if h_disp:
+                h_copy["author"] = dict(h_author, displayName=h_disp)
+        norm_items: List[dict] = []
+        for item in h_copy.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item_copy = dict(item)
+            if "toString" not in item_copy and "to_string" in item_copy:
+                item_copy["toString"] = item_copy["to_string"]
+            if "fromString" not in item_copy and "from_string" in item_copy:
+                item_copy["fromString"] = item_copy["from_string"]
+            norm_items.append(item_copy)
+        h_copy["items"] = norm_items
+        norm_histories.append(h_copy)
+
+    # Normalize inlined remote_links if provided by mcp-atlassian (`include="remote_links,..."`)
+    inlined_remote_links: List[dict] = []
+    raw_rl = raw_issue.get("remote_links") or fields.get("remote_links") or fields.get("remotelinks")
+    if isinstance(raw_rl, list):
+        for rl in raw_rl:
+            if not isinstance(rl, dict):
+                continue
+            if isinstance(rl.get("object"), dict) and rl["object"].get("url"):
+                inlined_remote_links.append(rl)
+            elif rl.get("url"):
+                inlined_remote_links.append({"object": {"url": rl["url"], "title": rl.get("title", "")}})
+
+    # Normalize inlined development_info / PRs if bundled inside the issue JSON
+    inlined_prs = normalize_dev_info_prs(
+        raw_issue.get("development_info") or raw_issue.get("prs") or raw_issue.get("pullRequests")
+    )
+
+    normalized_issue = dict(raw_issue)
+    normalized_issue["fields"] = fields
+    normalized_issue["changelog"] = {"histories": norm_histories}
+    if inlined_remote_links:
+        normalized_issue["_inlined_remote_links"] = inlined_remote_links
+    if inlined_prs:
+        normalized_issue["_inlined_prs"] = inlined_prs
+    return normalized_issue
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +1152,7 @@ class ZephyrRestClient:
         self._statuses_cache: Optional[Dict[int, str]] = None
         self._environments_cache: Optional[Dict[int, str]] = None
         self._project_testcases_cache: Optional[List[Dict[str, Any]]] = None
+        self._testcycles_cache: Dict[str, str] = {}
         self._lock = threading.RLock()
 
     @property
@@ -899,6 +1344,33 @@ class ZephyrRestClient:
             texts.append(f"{desc} {exp}")
         return " ".join(texts)
 
+    def get_testcycle_name(self, cycle_ref: Any) -> str:
+        """Resolve and cache a Zephyr Test Cycle's name (and key) from an execution's testCycle object."""
+        if not self.available or not isinstance(cycle_ref, dict):
+            return ""
+        inline_name = cycle_ref.get("name")
+        inline_key = cycle_ref.get("key")
+        if inline_name:
+            return f"{inline_key}: {inline_name}" if inline_key else str(inline_name)
+        cycle_id = str(cycle_ref.get("id") or "").strip()
+        self_url = str(cycle_ref.get("self") or "").strip()
+        if not cycle_id and "/testcycles/" in self_url:
+            cycle_id = self_url.rsplit("/testcycles/", 1)[-1].split("?", 1)[0].strip("/")
+        if not cycle_id:
+            return ""
+        with self._lock:
+            if cycle_id in self._testcycles_cache:
+                return self._testcycles_cache[cycle_id]
+        res = self._request(f"/testcycles/{urllib.parse.quote(cycle_id)}")
+        label = ""
+        if isinstance(res, dict):
+            c_key = str(res.get("key") or "")
+            c_name = str(res.get("name") or "")
+            label = f"{c_key}: {c_name}".strip(": ") if (c_key or c_name) else ""
+        with self._lock:
+            self._testcycles_cache[cycle_id] = label
+        return label
+
     def get_executions_for_testcase(self, testcase_key: str, project_key: str = "RSV1") -> List[Dict[str, Any]]:
         if not self.available:
             return []
@@ -920,11 +1392,13 @@ class ZephyrRestClient:
             env_name = env_map.get(env_id) if env_id else (
                 env_obj.get("name") if isinstance(env_obj, dict) else str(env_obj or "")
             )
+            cycle_name = self.get_testcycle_name(e.get("testCycle"))
             execs.append({
                 "id": str(e.get("id", "")),
                 "key": e.get("key"),
                 "status": status_name,
                 "environment": env_name,
+                "test_cycle_name": cycle_name,
                 "executed_by": (e.get("executedBy") or {}).get("name") or (e.get("executedBy") or {}).get("displayName") or "",
                 "date": str(e.get("actualEndDate") or e.get("executionDate") or e.get("createdOn") or "")[:10],
             })
@@ -1005,11 +1479,13 @@ def evaluate_single_story(
     jira: JiraRestClient,
     zephyr: ZephyrRestClient,
     lang: str = "en",
+    pre_fetched_prs: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
     """Evaluate all 21 User Story DoD criteria for a single Jira Story."""
     if lang not in ("en", "es"):
         lang = "en"
 
+    issue = normalize_issue_payload(issue)
     key = issue.get("key", "UNKNOWN")
     numeric_id = str(issue.get("id", ""))
     fields = issue.get("fields") or {}
@@ -1028,14 +1504,37 @@ def evaluate_single_story(
     comments_text = "\n".join(adf_to_text(c.get("body")) for c in comments_list if isinstance(c, dict))
     all_text = f"{summary}\n{desc_text}\n{comments_text}"
 
-    # 1. Fire the independent Jira calls in parallel (PRs via dev-status, remote links, field map)
+    inlined_prs = pre_fetched_prs if pre_fetched_prs is not None else issue.get("_inlined_prs")
+    inlined_remote_links = issue.get("_inlined_remote_links")
+    has_raw_subtasks = bool(fields.get("subtasks"))
+
+    # 1. Fire the independent Jira calls in parallel (PRs via dev-status, remote links, field map, subtasks details)
     io_pool = ThreadPoolExecutor(max_workers=6)
-    prs_future = io_pool.submit(jira.get_dev_status_prs, numeric_id) if numeric_id else None
-    remote_future = io_pool.submit(jira.get_remote_links, key)
-    fields_future = io_pool.submit(jira.get_fields_map)
+    prs_future = (
+        io_pool.submit(jira.get_dev_status_prs, numeric_id)
+        if (numeric_id and not inlined_prs and not jira.offline)
+        else None
+    )
+    remote_future = (
+        io_pool.submit(jira.get_remote_links, key)
+        if (not inlined_remote_links and not jira.offline)
+        else None
+    )
+    fields_future = io_pool.submit(jira.get_fields_map) if not jira.offline else None
+    subtasks_future = (
+        io_pool.submit(
+            jira.search_jql,
+            f'parent = "{key}" ORDER BY key ASC',
+            ["summary", "status", "resolution", "assignee", "issuetype"],
+            50,
+        )
+        if (has_raw_subtasks and not jira.offline)
+        else None
+    )
 
     # Also parse customfield_10000 summary as fallback
     cf_10000 = str(fields.get("customfield_10000") or "")
+    cf_summary = parse_cf_10000_summary(cf_10000)
 
     # 2. Inspect Issue Links & Parent for Requirement, Bugs, and Jira-level Test links
     linked_reqs: List[Dict[str, str]] = []
@@ -1096,16 +1595,39 @@ def evaluate_single_story(
                 "status": t_status,
             })
 
-    # 3. Subtasks inspection (Documentation, Testing, etc.)
-    subtasks: List[Dict[str, str]] = []
+    # 3. Subtasks inspection (Documentation, UX Validation, Testing, etc.)
+    subtasks_by_key: Dict[str, Dict[str, str]] = {}
     for st in fields.get("subtasks") or []:
         if isinstance(st, dict) and st.get("key"):
+            st_k = str(st["key"])
             st_f = st.get("fields") or {}
-            subtasks.append({
-                "key": str(st["key"]),
+            st_res_obj = st_f.get("resolution")
+            st_ass_obj = st_f.get("assignee")
+            subtasks_by_key[st_k] = {
+                "key": st_k,
                 "summary": str(st_f.get("summary") or ""),
                 "status": str((st_f.get("status") or {}).get("name") or "Unknown"),
-            })
+                "resolution": str(st_res_obj.get("name") if isinstance(st_res_obj, dict) and st_res_obj.get("name") else ""),
+                "assignee": str(st_ass_obj.get("displayName") if isinstance(st_ass_obj, dict) and st_ass_obj.get("displayName") else ""),
+            }
+    if subtasks_future is not None:
+        try:
+            for full_st in subtasks_future.result() or []:
+                if isinstance(full_st, dict) and full_st.get("key"):
+                    st_k = str(full_st["key"])
+                    st_f = full_st.get("fields") or {}
+                    st_res_obj = st_f.get("resolution")
+                    st_ass_obj = st_f.get("assignee")
+                    subtasks_by_key[st_k] = {
+                        "key": st_k,
+                        "summary": str(st_f.get("summary") or subtasks_by_key.get(st_k, {}).get("summary") or ""),
+                        "status": str((st_f.get("status") or {}).get("name") or subtasks_by_key.get(st_k, {}).get("status") or "Unknown"),
+                        "resolution": str(st_res_obj.get("name") if isinstance(st_res_obj, dict) and st_res_obj.get("name") else ""),
+                        "assignee": str(st_ass_obj.get("displayName") if isinstance(st_ass_obj, dict) and st_ass_obj.get("displayName") else ""),
+                    }
+        except Exception:
+            pass
+    subtasks: List[Dict[str, str]] = list(subtasks_by_key.values())
 
     # 4. Acceptance Criteria & Zephyr Test Cases via Requirement (and Story directly)
     ac_items = extract_acceptance_criteria(desc_text)
@@ -1125,18 +1647,61 @@ def evaluate_single_story(
                     tc["linked_via"] = t_key
                     zephyr_tcs.append(tc)
                     seen_tc_keys.add(tc["key"])
+                elif t_key == key:
+                    # If also linked directly to the Story, prefer the direct Story link
+                    for existing_tc in zephyr_tcs:
+                        if existing_tc["key"] == tc["key"]:
+                            existing_tc["linked_via"] = key
 
-    ac_coverage = match_ac_to_testcases(ac_items, zephyr_tcs)
+    # Classify Zephyr Test Cases by Story scope (handles 1 Requirement -> N Stories via Test Cycle names)
+    req_keys_upper = {r["key"].upper() for r in linked_reqs if r.get("key")}
+    story_key_upper = key.upper()
+    issue_key_pattern = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+
+    for tc in zephyr_tcs:
+        execs = tc.get("executions") or []
+        cycle_names = [str(e.get("test_cycle_name") or "") for e in execs if e.get("test_cycle_name")]
+        tc["cycle_names"] = list(dict.fromkeys(cycle_names))
+        linked_directly = str(tc.get("linked_via") or "").upper() == story_key_upper
+        named_for_story = story_key_upper in str(tc.get("name") or "").upper()
+        cycle_matches_story = any(story_key_upper in cn.upper() for cn in cycle_names)
+
+        other_story_keys: List[str] = []
+        for cn in cycle_names:
+            for m_key in issue_key_pattern.findall(cn.upper()):
+                if m_key != story_key_upper and m_key not in req_keys_upper and not m_key.startswith("RSV1-R") and not m_key.startswith("RSV1-T"):
+                    if m_key not in other_story_keys:
+                        other_story_keys.append(m_key)
+        tc["other_story_keys"] = other_story_keys
+
+        if linked_directly or named_for_story or cycle_matches_story:
+            tc["story_scope"] = "confirmed"
+        elif other_story_keys:
+            tc["story_scope"] = "other_story"
+        else:
+            tc["story_scope"] = "unscoped"
+
+    # For AC matching, exclude test cases explicitly scoped to a different story's test cycle
+    ac_eval_tcs = [t for t in zephyr_tcs if t.get("story_scope") != "other_story"] or zephyr_tcs
+    ac_coverage = match_ac_to_testcases(ac_items, ac_eval_tcs)
 
     # 5. Collect PRs, remote links & field map (Figma inspection)
-    prs: List[dict] = []
+    prs: List[dict] = list(inlined_prs) if inlined_prs else []
     if prs_future is not None:
         try:
             prs = prs_future.result()
         except Exception:
             prs = []
-    remote_links = remote_future.result()
-    fields_map = fields_future.result()
+    if inlined_remote_links is not None:
+        remote_links = list(inlined_remote_links)
+    elif remote_future is not None:
+        try:
+            remote_links = remote_future.result()
+        except Exception:
+            remote_links = []
+    else:
+        remote_links = []
+    fields_map = fields_future.result() if fields_future is not None else {}
     io_pool.shutdown(wait=False)
 
     criteria_items: List[Dict[str, Any]] = []
@@ -1149,6 +1714,10 @@ def evaluate_single_story(
     # Item 1: Links between the Story and the code changes established (Bitbucket PR)
     spec_1 = CRITERIA_SPECS["1"][lang]
     pr_count = len(prs)
+    has_cf_prs = bool(cf_summary.get("has_prs"))
+    has_any_pr = pr_count > 0 or has_cf_prs
+    cf_only_mode = (pr_count == 0 and has_cf_prs)
+
     if pr_count > 0:
         pr_summaries = [f"PR #{p.get('id')} ({p.get('repositoryName', 'repo')}): {p.get('status')}" for p in prs]
         note_1 = (
@@ -1170,16 +1739,18 @@ def evaluate_single_story(
             "checks": checks_1,
             "evidence": [p.get("url", "") for p in prs if p.get("url")],
         })
-    elif "pullrequest" in cf_10000 and "stateCount=" in cf_10000 and "stateCount=0" not in cf_10000:
+    elif has_cf_prs:
+        cf_cnt = cf_summary["count"]
+        cf_st = cf_summary["state"] or "LINKED"
         note_1 = (
-            f"Resumen de Pull Requests presente en el campo Development para {key}."
+            f"{cf_cnt} Pull Request(s) vinculado(s) a {key} en el panel Development de Jira (estado general: {cf_st})."
             if lang == "es" else
-            f"Pull Request summary present in Development field for {key}."
+            f"{cf_cnt} Pull Request(s) linked to {key} in Jira Development panel (overall state: {cf_st})."
         )
         checks_1 = [
-            "Enlace de Pull Request confirmado mediante el campo Development de Jira."
+            f"Confirmado en el panel Development de Jira: {cf_cnt} Pull Request(s) registrado(s) con estado {cf_st}."
             if lang == "es" else
-            "Confirmed Pull Request link via Jira Development field."
+            f"Confirmed via Jira Development panel: {cf_cnt} Pull Request(s) recorded with state {cf_st}."
         ]
         criteria_items.append({
             "id": "1",
@@ -1224,8 +1795,6 @@ def evaluate_single_story(
         })
 
     # Analyze approvals and merge states across PRs
-    has_cf_prs = "pullrequest" in cf_10000 and "stateCount=" in cf_10000 and "stateCount=0" not in cf_10000
-    has_any_pr = pr_count > 0 or has_cf_prs
     open_prs = [p for p in prs if str(p.get("status", "")).upper() == "OPEN"]
     merged_prs = [p for p in prs if str(p.get("status", "")).upper() == "MERGED"]
 
@@ -1297,6 +1866,35 @@ def evaluate_single_story(
             "note": note_2,
             "checks": pr_approval_checks,
         })
+    elif cf_only_mode:
+        note_2 = (
+            f"Se detectaron {cf_summary['count']} Pull Request(s) ({cf_summary['state']}); el detalle de revisores de Bitbucket requiere verificación manual en modo MCP."
+            if lang == "es" else
+            f"Detected {cf_summary['count']} Pull Request(s) ({cf_summary['state']}); Bitbucket reviewer detail requires manual verification in MCP mode."
+        )
+        checks_2 = [
+            (
+                f"El panel Development de Jira confirma {cf_summary['count']} Pull Request(s) en estado {cf_summary['state']}."
+                if lang == "es" else
+                f"Jira Development panel confirms {cf_summary['count']} Pull Request(s) in {cf_summary['state']} state."
+            ),
+            (
+                "El conector MCP utilizado no expone la lista individual de revisores de Bitbucket; configurar credenciales en .env permite validar aprobaciones automáticamente."
+                if lang == "es" else
+                "The active MCP connector does not expose individual Bitbucket reviewers; configuring credentials in .env enables automatic approval validation."
+            ),
+        ]
+        criteria_items.append({
+            "id": "2",
+            "group": spec_2["group"],
+            "title": spec_2["title"],
+            "description": spec_2["description"],
+            "status": "manual",
+            "reason": "tool-unavailable",
+            "note": note_2,
+            "checks": checks_2,
+            "issues": [key],
+        })
     else:
         note_2 = (
             "Falta evidencia de Pull Requests aprobados para dar por completado el code review."
@@ -1353,6 +1951,35 @@ def evaluate_single_story(
             "note": note_3,
             "checks": checks_3,
         })
+    elif cf_only_mode and cf_summary["state"] == "MERGED":
+        note_3 = (
+            f"Los {cf_summary['count']} Pull Request(s) figuran integrados (MERGED); confirmar manualmente las aprobaciones de revisores en Bitbucket."
+            if lang == "es" else
+            f"All {cf_summary['count']} Pull Request(s) are MERGED; manually confirm reviewer approvals in Bitbucket."
+        )
+        checks_3 = [
+            (
+                f"El panel Development de Jira confirma {cf_summary['count']} Pull Request(s) en estado MERGED."
+                if lang == "es" else
+                f"Jira Development panel confirms {cf_summary['count']} Pull Request(s) in MERGED state."
+            ),
+            (
+                "Verificar en Bitbucket que los revisores requeridos hayan aprobado el PR antes del merge."
+                if lang == "es" else
+                "Verify in Bitbucket that required reviewers approved the PR prior to merge."
+            ),
+        ]
+        criteria_items.append({
+            "id": "3",
+            "group": spec_3["group"],
+            "title": spec_3["title"],
+            "description": spec_3["description"],
+            "status": "manual",
+            "reason": "tool-unavailable",
+            "note": note_3,
+            "checks": checks_3,
+            "issues": [key],
+        })
     else:
         note_3 = (
             "No se puede dar por cerrado el seguimiento de observaciones hasta que todos los Pull Requests estén aprobados y mergeados."
@@ -1371,11 +1998,12 @@ def evaluate_single_story(
                 if lang == "es" else
                 f"There are {len(open_prs)} open Pull Request(s) still awaiting required reviewer approvals."
             ]
-        elif open_prs:
+        elif open_prs or (cf_only_mode and cf_summary["state"] == "OPEN"):
+            open_cnt = len(open_prs) or cf_summary["open_count"]
             checks_3 = [
-                f"Aunque los revisores ya aprobaron, aún quedan {len(open_prs)} Pull Request(s) en estado OPEN pendientes de merge."
+                f"Aún quedan {open_cnt} Pull Request(s) en estado OPEN pendientes de merge."
                 if lang == "es" else
-                f"Although approved by reviewers, {len(open_prs)} Pull Request(s) remain OPEN awaiting merge."
+                f"{open_cnt} Pull Request(s) remain OPEN awaiting merge."
             ]
         else:
             checks_3 = [
@@ -1420,11 +2048,34 @@ def evaluate_single_story(
             "note": note_4,
             "checks": checks_4,
         })
+    elif cf_only_mode and cf_summary["state"] == "MERGED":
+        cf_cnt = cf_summary["count"]
+        note_4 = (
+            f"{cf_cnt} Pull Request(s) integrado(s) (MERGED) según el panel Development de Jira; sin Pull Requests abiertos."
+            if lang == "es" else
+            f"{cf_cnt} Pull Request(s) merged according to Jira Development panel; 0 open PRs."
+        )
+        checks_4 = [
+            f"Confirmado en el panel Development de Jira: {cf_cnt} Pull Request(s) en estado MERGED."
+            if lang == "es" else
+            f"Confirmed via Jira Development panel: {cf_cnt} Pull Request(s) in MERGED state."
+        ]
+        criteria_items.append({
+            "id": "4",
+            "group": spec_4["group"],
+            "title": spec_4["title"],
+            "description": spec_4["description"],
+            "status": "pass",
+            "note": note_4,
+            "checks": checks_4,
+        })
     else:
+        has_open_any = bool(open_prs) or (cf_only_mode and cf_summary["state"] == "OPEN")
+        open_total = len(open_prs) if open_prs else cf_summary["open_count"]
         if lang == "es":
-            reason_note = f"Hay {len(open_prs)} Pull Request(s) todavía en estado abierto (OPEN)." if open_prs else "No se encontraron Pull Requests integrados (MERGED) en la rama principal."
+            reason_note = f"Hay {open_total} Pull Request(s) todavía en estado abierto (OPEN)." if has_open_any else "No se encontraron Pull Requests integrados (MERGED) en la rama principal."
         else:
-            reason_note = f"{len(open_prs)} Pull Request(s) are still OPEN." if open_prs else "No merged Pull Requests found."
+            reason_note = f"{open_total} Pull Request(s) are still OPEN." if has_open_any else "No merged Pull Requests found."
         checks_4_prs = [
             (
                 f"PR #{p.get('id')} ({p.get('repositoryName') or 'Bitbucket'}): estado actual {p.get('status')}."
@@ -1432,11 +2083,19 @@ def evaluate_single_story(
                 f"PR #{p.get('id')} ({p.get('repositoryName') or 'Bitbucket'}): current status {p.get('status')}."
             )
             for p in prs
-        ] or (
-            ["No hay Pull Requests integrados (MERGED) registrados para esta historia."]
-            if lang == "es" else
-            ["No merged Pull Requests recorded for this story."]
-        )
+        ]
+        if not checks_4_prs and cf_only_mode:
+            checks_4_prs = [
+                f"El panel Development de Jira reporta {cf_summary['count']} Pull Request(s) con estado {cf_summary['state']}."
+                if lang == "es" else
+                f"Jira Development panel reports {cf_summary['count']} Pull Request(s) with state {cf_summary['state']}."
+            ]
+        if not checks_4_prs:
+            checks_4_prs = (
+                ["No hay Pull Requests integrados (MERGED) registrados para esta historia."]
+                if lang == "es" else
+                ["No merged Pull Requests recorded for this story."]
+            )
         criteria_items.append({
             "id": "4",
             "group": spec_4["group"],
@@ -1447,7 +2106,7 @@ def evaluate_single_story(
             "checks": checks_4_prs,
             "issues": [key],
         })
-        if open_prs:
+        if has_open_any:
             act_text_4 = (
                 f"Integrar (merge) o cerrar los Pull Requests abiertos vinculados a {key}."
                 if lang == "es" else
@@ -1476,6 +2135,48 @@ def evaluate_single_story(
             "status": "pass",
             "note": note_5,
             "checks": pr_approval_checks,
+        })
+    elif cf_only_mode:
+        is_unity_story = "[unity]" in summary.lower()
+        req_app_hint = 2 if is_unity_story else 1
+        note_5 = (
+            f"Verificación manual requerida en Bitbucket: confirmar al menos {req_app_hint} aprobador(es) distinto(s) al autor en los {cf_summary['count']} PR(s)."
+            if lang == "es" else
+            f"Manual verification required in Bitbucket: confirm at least {req_app_hint} non-author approver(s) on the {cf_summary['count']} PR(s)."
+        )
+        checks_5 = [
+            (
+                f"Se registran {cf_summary['count']} Pull Request(s) en estado {cf_summary['state']} en el panel Development de Jira."
+                if lang == "es" else
+                f"{cf_summary['count']} Pull Request(s) in {cf_summary['state']} state are recorded in the Jira Development panel."
+            ),
+            (
+                "Para validar automáticamente los nombres de revisores y la regla de 2 aprobadores en unity, configure JIRA_API_TOKEN en su archivo .env."
+                if lang == "es" else
+                "To automatically validate reviewer names and the unity 2-approver rule, configure JIRA_API_TOKEN in your .env file."
+            ),
+        ]
+        criteria_items.append({
+            "id": "5",
+            "group": spec_5["group"],
+            "title": spec_5["title"],
+            "description": spec_5["description"],
+            "status": "manual",
+            "reason": "tool-unavailable",
+            "note": note_5,
+            "checks": checks_5,
+            "issues": [key],
+        })
+        act_text_5_manual = (
+            f"Verificar en Bitbucket que los {cf_summary['count']} Pull Request(s) de {key} cuenten con las aprobaciones requeridas (2 para repositorio unity, 1 para el resto)."
+            if lang == "es" else
+            f"Verify in Bitbucket that the {cf_summary['count']} Pull Request(s) of {key} have the required approvals (2 for unity repo, 1 for others)."
+        )
+        actions.append({
+            "group": "manual",
+            "criterion": "5",
+            "text": act_text_5_manual,
+            "issues": [key],
         })
     else:
         note_5 = (
@@ -1695,48 +2396,99 @@ def evaluate_single_story(
             "checks": checks_8,
         })
     else:
-        ux_subtasks = [
-            st for st in subtasks
-            if any(w in st["summary"].lower() for w in ("ux", "ui/ux", "ux/ui", "uxui", "figma"))
-        ]
-        note_8 = (
-            "Requiere confirmación visual de UX/QA para validar que la interfaz implementada coincide con el diseño aprobado en Figma."
-            if lang == "es" else
-            "Requires visual UX/QA confirmation that the implemented UI matches the approved Figma baseline."
+        ux_summary_terms = (
+            "ux validation", "ux verification", "[uxui]", "[ux/ui]",
+            "ux/ui", "uxui", "ui/ux", "updating figma", "figma",
         )
-        checks_8 = [
-            "Confirmar visualmente con el equipo de UX/QA que la pantalla implementada respeta la última versión aprobada en Figma."
-            if lang == "es" else
-            "Confirm visually with UX/QA that the implemented screen matches the latest approved Figma design."
+        doc_summary_terms = ("[doc]", "documentation", "user manual", "architecture", "scmp", "soup")
+        ux_subtasks: List[Dict[str, str]] = []
+        for st in subtasks:
+            s_low = st["summary"].lower()
+            is_doc_st = any(dw in s_low for dw in doc_summary_terms)
+            has_ux_title = any(uw in s_low for uw in ux_summary_terms) or bool(re.search(r"\bux\b", s_low))
+            has_ux_assignee = is_same_person(st.get("assignee", ""), "Belen Yacoub") or is_same_person(s_low, "Belen Yacoub")
+            if (has_ux_title or has_ux_assignee) and not is_doc_st:
+                ux_subtasks.append(st)
+
+        invalid_ux_resolutions = {"won't do", "wont do", "duplicate", "cannot reproduce", "cancelled", "canceled", "declined", "rejected"}
+        completed_ux_subtasks = [
+            st for st in ux_subtasks
+            if st["status"].lower() in ("resolved", "closed", "done")
+            and st.get("resolution", "").strip().lower() not in invalid_ux_resolutions
         ]
-        for ux_st in ux_subtasks:
-            checks_8.append(
-                f"Subtarea de UX registrada en la historia: {ux_st['key']} — {ux_st['summary']} (estado: {ux_st['status']})."
+        open_ux_subtasks = [
+            st for st in ux_subtasks
+            if st["status"].lower() not in ("resolved", "closed", "done")
+        ]
+
+        if completed_ux_subtasks and not open_ux_subtasks:
+            st_labels = ", ".join(f"{st['key']} ({st['status']})" for st in completed_ux_subtasks)
+            note_8 = (
+                f"Diseño de UI verificado mediante subtarea(s) de validación UX completada(s): {st_labels}."
                 if lang == "es" else
-                f"UX sub-task recorded on the story: {ux_st['key']} — {ux_st['summary']} (status: {ux_st['status']})."
+                f"Implemented UI design verified via completed UX validation sub-task(s): {st_labels}."
             )
-        criteria_items.append({
-            "id": "8",
-            "group": spec_8["group"],
-            "title": spec_8["title"],
-            "description": spec_8["description"],
-            "status": "manual",
-            "reason": "by-design",
-            "note": note_8,
-            "checks": checks_8,
-            "issues": [key],
-        })
-        act_text_8 = (
-            f"Confirmar que la interfaz implementada para {key} coincida con la última línea base aprobada en Figma."
-            if lang == "es" else
-            f"Confirm that the implemented UI for {key} matches the latest approved Figma baseline."
-        )
-        actions.append({
-            "group": "manual",
-            "criterion": "8",
-            "text": act_text_8,
-            "issues": [key],
-        })
+            checks_8 = []
+            for ux_st in completed_ux_subtasks:
+                res_info = f", resolución: {ux_st['resolution']}" if (lang == "es" and ux_st.get("resolution")) else (
+                    f", resolution: {ux_st['resolution']}" if ux_st.get("resolution") else ""
+                )
+                ass_info = f", responsable: {ux_st['assignee']}" if (lang == "es" and ux_st.get("assignee")) else (
+                    f", assignee: {ux_st['assignee']}" if ux_st.get("assignee") else ""
+                )
+                checks_8.append(
+                    f"Subtarea de UX completada: {ux_st['key']} — {ux_st['summary']} (estado: {ux_st['status']}{res_info}{ass_info})."
+                    if lang == "es" else
+                    f"Completed UX sub-task: {ux_st['key']} — {ux_st['summary']} (status: {ux_st['status']}{res_info}{ass_info})."
+                )
+            criteria_items.append({
+                "id": "8",
+                "group": spec_8["group"],
+                "title": spec_8["title"],
+                "description": spec_8["description"],
+                "status": "pass",
+                "note": note_8,
+                "checks": checks_8,
+            })
+        else:
+            note_8 = (
+                "Requiere confirmación visual de UX/QA para validar que la interfaz implementada coincide con el diseño aprobado en Figma."
+                if lang == "es" else
+                "Requires visual UX/QA confirmation that the implemented UI matches the approved Figma baseline."
+            )
+            checks_8 = [
+                "Confirmar visualmente con el equipo de UX/QA que la pantalla implementada respeta la última versión aprobada en Figma."
+                if lang == "es" else
+                "Confirm visually with UX/QA that the implemented screen matches the latest approved Figma design."
+            ]
+            for ux_st in ux_subtasks:
+                checks_8.append(
+                    f"Subtarea de UX registrada en la historia: {ux_st['key']} — {ux_st['summary']} (estado: {ux_st['status']})."
+                    if lang == "es" else
+                    f"UX sub-task recorded on the story: {ux_st['key']} — {ux_st['summary']} (status: {ux_st['status']})."
+                )
+            criteria_items.append({
+                "id": "8",
+                "group": spec_8["group"],
+                "title": spec_8["title"],
+                "description": spec_8["description"],
+                "status": "manual",
+                "reason": "by-design",
+                "note": note_8,
+                "checks": checks_8,
+                "issues": [key],
+            })
+            act_text_8 = (
+                f"Confirmar que la interfaz implementada para {key} coincida con la última línea base aprobada en Figma."
+                if lang == "es" else
+                f"Confirm that the implemented UI for {key} matches the latest approved Figma baseline."
+            )
+            actions.append({
+                "group": "manual",
+                "criterion": "8",
+                "text": act_text_8,
+                "issues": [key],
+            })
 
     # -----------------------------------------------------------------------
     # Group C: Traceability & Requirements (Items 9 - 11)
@@ -2160,14 +2912,25 @@ def evaluate_single_story(
                 "issues": [key],
             })
     else:
+        # Shared Requirement Test Case Disambiguation (1 Requirement -> N Stories via Test Cycle names)
+        active_all_tcs = [t for t in zephyr_tcs if str(t.get("status", "")).lower() != "deprecated"]
+        deprecated_tcs = [t for t in zephyr_tcs if str(t.get("status", "")).lower() == "deprecated"]
+        confirmed_tcs = [t for t in active_all_tcs if t.get("story_scope") == "confirmed"]
+        other_story_tcs = [t for t in active_all_tcs if t.get("story_scope") == "other_story"]
+        unscoped_tcs = [t for t in active_all_tcs if t.get("story_scope") == "unscoped"]
+
+        # Test cases applicable to this story (exclude TCs explicitly executed only in another story's test cycle)
+        active_tcs = [t for t in active_all_tcs if t.get("story_scope") != "other_story"]
+
         # Item 12: Test cases created/updated in Jira/Zephyr
         spec_12 = CRITERIA_SPECS["12"][lang]
-        if zephyr_tcs:
-            tc_list_str = ", ".join(f"{t['key']} ({t['status']})" for t in zephyr_tcs)
+        if active_tcs or deprecated_tcs:
+            shown_tcs = active_tcs if active_tcs else deprecated_tcs
+            tc_list_str = ", ".join(f"{t['key']} ({t['status']})" for t in shown_tcs)
             note_12 = (
-                f"Se encontraron {len(zephyr_tcs)} Caso(s) de Prueba en Zephyr: {tc_list_str}."
+                f"Se encontraron {len(shown_tcs)} Caso(s) de Prueba en Zephyr aplicables a {key}: {tc_list_str}."
                 if lang == "es" else
-                f"Found {len(zephyr_tcs)} Zephyr Test Case(s): {tc_list_str}."
+                f"Found {len(shown_tcs)} Zephyr Test Case(s) applicable to {key}: {tc_list_str}."
             )
             checks_12 = [
                 (
@@ -2175,8 +2938,17 @@ def evaluate_single_story(
                     if lang == "es" else
                     f"{t['key']} (linked via {t.get('linked_via')}): {t['name']} — status: {t['status']}."
                 )
-                for t in zephyr_tcs
+                for t in shown_tcs
             ]
+            if other_story_tcs:
+                other_desc = ", ".join(
+                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
+                )
+                checks_12.append(
+                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba del requerimiento compartido asignados en ciclos de otra historia: {other_desc}."
+                    if lang == "es" else
+                    f"Excluded {len(other_story_tcs)} test case(s) on the shared Requirement scoped to another story's Test Cycle: {other_desc}."
+                )
             criteria_items.append({
                 "id": "12",
                 "group": spec_12["group"],
@@ -2185,6 +2957,41 @@ def evaluate_single_story(
                 "status": "pass",
                 "note": note_12,
                 "checks": checks_12,
+            })
+        elif other_story_tcs:
+            other_desc = ", ".join(
+                f"{t['key']} (ciclo de {'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
+            )
+            note_12 = (
+                f"El Requerimiento vinculado cuenta con {len(other_story_tcs)} Caso(s) de Prueba en Zephyr, pero sus ciclos de prueba hacen referencia a otra historia ({other_desc})."
+                if lang == "es" else
+                f"The linked Requirement has {len(other_story_tcs)} Zephyr Test Case(s), but their Test Cycles reference another story ({other_desc})."
+            )
+            checks_12 = [
+                f"Casos de prueba en el Requerimiento compartido asociados por ciclo a otra historia: {other_desc}."
+                if lang == "es" else
+                f"Test cases on the shared Requirement scoped by Test Cycle name to another story: {other_desc}."
+            ]
+            criteria_items.append({
+                "id": "12",
+                "group": spec_12["group"],
+                "title": spec_12["title"],
+                "description": spec_12["description"],
+                "status": "fail",
+                "note": note_12,
+                "checks": checks_12,
+                "issues": [key],
+            })
+            act_text_12 = (
+                f"Vincular o incluir en un Test Cycle de {key} los Casos de Prueba de Zephyr correspondientes a esta historia."
+                if lang == "es" else
+                f"Link or include in a Test Cycle named with {key} the Zephyr Test Cases corresponding to this story."
+            )
+            actions.append({
+                "group": "fix",
+                "criterion": "12",
+                "text": act_text_12,
+                "issues": [key],
             })
         else:
             note_12 = (
@@ -2221,9 +3028,10 @@ def evaluate_single_story(
 
         # Item 13: Test cases reviewed and approved
         spec_13 = CRITERIA_SPECS["13"][lang]
-        active_tcs = [t for t in zephyr_tcs if str(t.get("status", "")).lower() != "deprecated"]
-        deprecated_tcs = [t for t in zephyr_tcs if str(t.get("status", "")).lower() == "deprecated"]
         unapproved_tcs = [t for t in active_tcs if str(t.get("status", "")).lower() != "approved"]
+        unapproved_confirmed = [t for t in confirmed_tcs if str(t.get("status", "")).lower() != "approved"]
+        unapproved_unscoped = [t for t in unscoped_tcs if str(t.get("status", "")).lower() != "approved"]
+
         if active_tcs and not unapproved_tcs:
             note_13 = (
                 f"Los {len(active_tcs)} Caso(s) de Prueba activos en Zephyr están revisados y aprobados ('Approved')."
@@ -2234,6 +3042,15 @@ def evaluate_single_story(
                 (f"{t['key']} ({t['name']}): estado {t['status']}." if lang == "es" else f"{t['key']} ({t['name']}): status {t['status']}.")
                 for t in active_tcs
             ]
+            if other_story_tcs:
+                other_keys = ", ".join(
+                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
+                )
+                checks_13.append(
+                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba asignados por Test Cycle a otra historia: {other_keys}."
+                    if lang == "es" else
+                    f"Ignored {len(other_story_tcs)} test case(s) assigned by Test Cycle to another story: {other_keys}."
+                )
             if deprecated_tcs:
                 dep_keys = ", ".join(t["key"] for t in deprecated_tcs)
                 checks_13.append(
@@ -2250,28 +3067,82 @@ def evaluate_single_story(
                 "note": note_13,
                 "checks": checks_13,
             })
+        elif confirmed_tcs and not unapproved_confirmed and unapproved_unscoped:
+            unscoped_str = ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_unscoped)
+            note_13 = (
+                f"Los {len(confirmed_tcs)} Caso(s) de Prueba confirmados en ciclos de {key} están en estado 'Approved'. "
+                f"Hay {len(unapproved_unscoped)} caso(s) en el Requerimiento compartido sin ciclo de esta historia ({unscoped_str}): confirmar con QA si pertenecen a otra historia."
+                if lang == "es" else
+                f"All {len(confirmed_tcs)} Test Case(s) confirmed in {key} Test Cycles are 'Approved'. "
+                f"{len(unapproved_unscoped)} test case(s) on the shared Requirement have no cycle for this story ({unscoped_str}): confirm with QA if they belong to another story."
+            )
+            checks_13 = [
+                (
+                    f"{t['key']} ({t['name']}): estado {t['status']} — confirmado en ciclo de {key} ({', '.join(t.get('cycle_names') or []) or key})."
+                    if lang == "es" else
+                    f"{t['key']} ({t['name']}): status {t['status']} — confirmed in {key} cycle ({', '.join(t.get('cycle_names') or []) or key})."
+                )
+                for t in confirmed_tcs
+            ]
+            for t in unapproved_unscoped:
+                checks_13.append(
+                    f"⚠️ Revisión manual (Requerimiento compartido {t.get('linked_via')}): {t['key']} ({t['name']}) está en estado '{t['status']}' y aún no figura en un Test Cycle con el ID {key}. Confirmar si pertenece a otra historia."
+                    if lang == "es" else
+                    f"⚠️ Manual review (shared Requirement {t.get('linked_via')}): {t['key']} ({t['name']}) is in '{t['status']}' status and has no Test Cycle naming {key}. Confirm whether it belongs to another story."
+                )
+            if other_story_tcs:
+                other_keys = ", ".join(
+                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
+                )
+                checks_13.append(
+                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba asignados por Test Cycle a otra historia: {other_keys}."
+                    if lang == "es" else
+                    f"Ignored {len(other_story_tcs)} test case(s) assigned by Test Cycle to another story: {other_keys}."
+                )
+            criteria_items.append({
+                "id": "13",
+                "group": spec_13["group"],
+                "title": spec_13["title"],
+                "description": spec_13["description"],
+                "status": "manual",
+                "reason": "by-design",
+                "note": note_13,
+                "checks": checks_13,
+                "issues": [key],
+            })
+            act_text_13_manual = (
+                f"Confirmar con QA si los casos de prueba {unscoped_str} (vinculados al Requerimiento compartido) pertenecen a otra historia o si deben aprobarse e incluirse en un Test Cycle de {key}."
+                if lang == "es" else
+                f"Confirm with QA whether test cases {unscoped_str} (linked to the shared Requirement) belong to another story or must be approved and added to a {key} Test Cycle."
+            )
+            actions.append({
+                "group": "manual",
+                "criterion": "13",
+                "text": act_text_13_manual,
+                "issues": [key],
+            })
         else:
             if lang == "es":
                 note_13 = (
                     f"{len(unapproved_tcs)} de {len(active_tcs)} Caso(s) de Prueba aún no están en estado 'Approved': "
                     + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
                     if active_tcs
-                    else "No hay casos de prueba vinculados para verificar su aprobación."
+                    else "No hay casos de prueba vinculados a esta historia para verificar su aprobación."
                 )
             else:
                 note_13 = (
                     f"{len(unapproved_tcs)} of {len(active_tcs)} Test Case(s) are not yet 'Approved': "
                     + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
                     if active_tcs
-                    else "No linked Test Cases found to verify approval status."
+                    else "No linked Test Cases found for this story to verify approval status."
                 )
             checks_13 = [
                 (f"{t['key']} ({t['name']}): estado actual {t['status']}." if lang == "es" else f"{t['key']} ({t['name']}): current status {t['status']}.")
                 for t in active_tcs
             ] or (
-                ["No hay casos de prueba registrados en Zephyr para evaluar su estado de revisión."]
+                ["No hay casos de prueba registrados en Zephyr para esta historia."]
                 if lang == "es" else
-                ["No test cases recorded in Zephyr to evaluate review status."]
+                ["No test cases recorded in Zephyr for this story."]
             )
             criteria_items.append({
                 "id": "13",
@@ -2299,16 +3170,25 @@ def evaluate_single_story(
         # Item 14 & 15: Test cases executed on pre-staging & Evidence of test execution linked
         spec_14 = CRITERIA_SPECS["14"][lang]
         spec_15 = CRITERIA_SPECS["15"][lang]
-        passed_tcs = []
-        failed_or_unexec_tcs = []
-        eval_tcs = active_tcs if active_tcs else zephyr_tcs
+        passed_tcs: List[Tuple[str, Dict[str, Any]]] = []
+        failed_or_unexec_tcs: List[str] = []
+        failed_confirmed_tcs: List[str] = []
+        failed_unscoped_tcs: List[Dict[str, Any]] = []
+        eval_tcs = active_tcs
         for t in eval_tcs:
             execs = t.get("executions") or []
             passed_ex = [e for e in execs if str(e.get("status", "")).lower() in ("pass", "passed")]
             if passed_ex:
-                passed_tcs.append((t["key"], passed_ex[0]))
+                # Prefer an execution whose test_cycle_name explicitly mentions this story key
+                story_ex = [e for e in passed_ex if story_key_upper in str(e.get("test_cycle_name") or "").upper()]
+                chosen_ex = story_ex[0] if story_ex else passed_ex[0]
+                passed_tcs.append((t["key"], chosen_ex))
             else:
                 failed_or_unexec_tcs.append(t["key"])
+                if t.get("story_scope") == "confirmed":
+                    failed_confirmed_tcs.append(t["key"])
+                else:
+                    failed_unscoped_tcs.append(t)
 
         if eval_tcs and not failed_or_unexec_tcs:
             note_14 = (
@@ -2318,12 +3198,25 @@ def evaluate_single_story(
             )
             checks_14 = [
                 (
-                    f"{tk}: última ejecución aprobada el {ex.get('date', 'N/A')} (entorno: {ex.get('environment') or 'pre-staging'})."
+                    f"{tk}: última ejecución aprobada el {ex.get('date', 'N/A')} (entorno: {ex.get('environment') or 'pre-staging'}"
+                    + (f", ciclo: {ex.get('test_cycle_name')}" if ex.get("test_cycle_name") else "")
+                    + ")."
                     if lang == "es" else
-                    f"{tk}: last passing execution on {ex.get('date', 'N/A')} (environment: {ex.get('environment') or 'pre-staging'})."
+                    f"{tk}: last passing execution on {ex.get('date', 'N/A')} (environment: {ex.get('environment') or 'pre-staging'}"
+                    + (f", cycle: {ex.get('test_cycle_name')}" if ex.get("test_cycle_name") else "")
+                    + ")."
                 )
                 for tk, ex in passed_tcs
             ]
+            if other_story_tcs:
+                other_keys = ", ".join(
+                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
+                )
+                checks_14.append(
+                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba ejecutados en Test Cycles de otra historia: {other_keys}."
+                    if lang == "es" else
+                    f"Ignored {len(other_story_tcs)} test case(s) executed in another story's Test Cycles: {other_keys}."
+                )
             criteria_items.append({
                 "id": "14",
                 "group": spec_14["group"],
@@ -2340,9 +3233,11 @@ def evaluate_single_story(
             )
             checks_15 = [
                 (
-                    f"Ejecución #{ex.get('id')} registrada para {tk} con resultado {ex.get('status')}."
+                    f"Ejecución #{ex.get('id')} registrada para {tk} con resultado {ex.get('status')}"
+                    + (f" ({ex.get('test_cycle_name')})." if ex.get("test_cycle_name") else ".")
                     if lang == "es" else
-                    f"Execution #{ex.get('id')} recorded for {tk} with status {ex.get('status')}."
+                    f"Execution #{ex.get('id')} recorded for {tk} with status {ex.get('status')}"
+                    + (f" ({ex.get('test_cycle_name')})." if ex.get("test_cycle_name") else ".")
                 )
                 for tk, ex in passed_tcs
             ]
@@ -2355,8 +3250,64 @@ def evaluate_single_story(
                 "note": note_15,
                 "checks": checks_15,
             })
+        elif confirmed_tcs and not failed_confirmed_tcs and failed_unscoped_tcs:
+            unscoped_exec_str = ", ".join(f"{t['key']} ({t['status']})" for t in failed_unscoped_tcs)
+            note_manual_14 = (
+                f"Los {len(confirmed_tcs)} Caso(s) de Prueba en los Test Cycles de {key} fueron ejecutados y aprobados (PASS). "
+                f"Quedan {len(failed_unscoped_tcs)} caso(s) en el Requerimiento compartido sin ejecución en un ciclo de {key} ({unscoped_exec_str}): confirmar si pertenecen a otra historia."
+                if lang == "es" else
+                f"All {len(confirmed_tcs)} Test Case(s) in {key} Test Cycles have passing (PASS) executions. "
+                f"{len(failed_unscoped_tcs)} test case(s) on the shared Requirement have no execution in a {key} cycle ({unscoped_exec_str}): confirm if they belong to another story."
+            )
+            checks_manual_14 = [
+                (
+                    f"{tk}: ejecución aprobada ({ex.get('status')}) el {ex.get('date', 'N/A')} en ciclo '{ex.get('test_cycle_name') or key}'."
+                    if lang == "es" else
+                    f"{tk}: passing execution ({ex.get('status')}) on {ex.get('date', 'N/A')} in cycle '{ex.get('test_cycle_name') or key}'."
+                )
+                for tk, ex in passed_tcs
+            ]
+            for t in failed_unscoped_tcs:
+                checks_manual_14.append(
+                    f"⚠️ Revisión manual (Requerimiento compartido {t.get('linked_via')}): {t['key']} ({t['name']}, estado: {t['status']}) no registra ejecuciones en un Test Cycle con el ID {key}. Confirmar con QA si corresponde a otra historia."
+                    if lang == "es" else
+                    f"⚠️ Manual review (shared Requirement {t.get('linked_via')}): {t['key']} ({t['name']}, status: {t['status']}) has no executions in a Test Cycle naming {key}. Confirm with QA if it belongs to another story."
+                )
+            criteria_items.append({
+                "id": "14",
+                "group": spec_14["group"],
+                "title": spec_14["title"],
+                "description": spec_14["description"],
+                "status": "manual",
+                "reason": "by-design",
+                "note": note_manual_14,
+                "checks": checks_manual_14,
+                "issues": [key],
+            })
+            criteria_items.append({
+                "id": "15",
+                "group": spec_15["group"],
+                "title": spec_15["title"],
+                "description": spec_15["description"],
+                "status": "manual",
+                "reason": "by-design",
+                "note": note_manual_14,
+                "checks": checks_manual_14,
+                "issues": [key],
+            })
+            act_text_14_manual = (
+                f"Confirmar con QA si los casos de prueba sin ciclo de {key} ({unscoped_exec_str}) corresponden a otra historia que comparte el Requerimiento o si resta ejecutarlos para {key}."
+                if lang == "es" else
+                f"Confirm with QA whether the test cases without a {key} Test Cycle ({unscoped_exec_str}) belong to another story sharing the Requirement or still need execution for {key}."
+            )
+            actions.append({
+                "group": "manual",
+                "criterion": "14",
+                "text": act_text_14_manual,
+                "issues": [key],
+            })
         else:
-            missing_str = ", ".join(failed_or_unexec_tcs) if failed_or_unexec_tcs else ("ningún caso de prueba vinculado" if lang == "es" else "no test cases linked")
+            missing_str = ", ".join(failed_or_unexec_tcs) if failed_or_unexec_tcs else ("ningún caso de prueba vinculado a esta historia" if lang == "es" else "no test cases linked to this story")
             note_fail = (
                 f"Falta evidencia de ejecución aprobada (PASS) en Zephyr ({missing_str})."
                 if lang == "es" else
@@ -2366,12 +3317,12 @@ def evaluate_single_story(
                 (
                     f"Casos de prueba sin ejecución aprobada (PASS) en Zephyr: {missing_str}."
                     if failed_or_unexec_tcs else
-                    "No hay casos de prueba vinculados en Zephyr para verificar registros de ejecución."
+                    "No hay casos de prueba vinculados en Zephyr para esta historia que permitan verificar registros de ejecución."
                 )
                 if lang == "es" else (
                     f"Test cases without a PASS execution in Zephyr: {missing_str}."
                     if failed_or_unexec_tcs else
-                    "No linked test cases in Zephyr to verify execution records."
+                    "No linked test cases in Zephyr for this story to verify execution records."
                 )
             ]
             criteria_items.append({
@@ -2662,11 +3613,11 @@ def evaluate_single_story(
     manual_count = sum(1 for c in criteria_items if c["status"] == "manual")
 
     flags: List[str] = []
-    if pr_count == 0:
+    if not has_any_pr:
         flags.append("Sin Pull Request vinculado" if lang == "es" else "No PR linked")
-    elif open_prs:
+    elif open_prs or (cf_only_mode and cf_summary["state"] == "OPEN"):
         flags.append("Tiene PR abierto" if lang == "es" else "Open PR")
-    elif not all_prs_properly_approved:
+    elif pr_count > 0 and not all_prs_properly_approved:
         flags.append("Faltan aprobaciones de PR" if lang == "es" else "Missing PR approvals")
     if not linked_reqs:
         flags.append("Sin requerimiento vinculado" if lang == "es" else "Missing requirement link")
@@ -2686,6 +3637,7 @@ def evaluate_single_story(
         "linked_reqs": linked_reqs,
         "linked_bugs": linked_bugs,
         "prs": prs,
+        "cf_pr_summary": cf_summary,
         "figma_urls": figma_urls,
         "no_figma_declared": no_figma_declared,
         "ac_items": ac_items,
@@ -2756,6 +3708,7 @@ def build_single_story_report(
 
     # Pull Requests table
     pr_rows: List[List[str]] = []
+    cf_pr_summary = eval_result.get("cf_pr_summary") or {}
     for p in eval_result["prs"]:
         author = str((p.get("author") or {}).get("name") or ("Desconocido" if lang == "es" else "Unknown"))
         revs = [
@@ -2770,6 +3723,17 @@ def build_single_story_report(
             author,
             ", ".join(revs) if revs else ("Ninguno" if lang == "es" else "None"),
             str((p.get("destination") or {}).get("branch") or "master"),
+        ])
+    if not pr_rows and cf_pr_summary.get("has_prs"):
+        cf_cnt = int(cf_pr_summary.get("count") or 0)
+        cf_state = str(cf_pr_summary.get("state") or "LINKED")
+        pr_rows.append([
+            f"{cf_cnt} PR(s)" if lang == "en" else f"{cf_cnt} PR(s) vinculado(s)",
+            "Bitbucket (panel Development)" if lang == "es" else "Bitbucket (Development panel)",
+            cf_state,
+            "Ver en Bitbucket" if lang == "es" else "See in Bitbucket",
+            "Verificación manual (modo MCP)" if lang == "es" else "Manual verification (MCP mode)",
+            "master",
         ])
 
     # Traceability & AC coverage table
@@ -2822,12 +3786,19 @@ def build_single_story_report(
 
     none_linked_reqs = "Ninguno (¡Faltante!)" if lang == "es" else "None (Missing!)"
 
+    total_pr_count = len(eval_result["prs"]) or int(cf_pr_summary.get("count") or 0)
+    merged_pr_count = (
+        len([p for p in eval_result["prs"] if str(p.get("status", "")).upper() == "MERGED"])
+        if eval_result["prs"]
+        else int(cf_pr_summary.get("merged_count") or 0)
+    )
+
     overview_items = [
         {"key": "Clave de Story" if lang == "es" else "Story Key", "value": f"{key} — {eval_result['summary']}"},
         {"key": "Estado / Resolución" if lang == "es" else "Status / Resolution", "value": f"{eval_result['status']} ({eval_result['resolution']})"},
         {"key": "Responsable" if lang == "es" else "Assignee", "value": eval_result["assignee"]},
         {"key": "Requerimiento(s) Vinculado(s)" if lang == "es" else "Linked Requirement(s)", "value": ", ".join(f"{r['key']}: {r['summary']}" for r in eval_result["linked_reqs"]) or none_linked_reqs},
-        {"key": "Pull Requests Vinculados" if lang == "es" else "Linked Pull Requests", "value": str(len(eval_result["prs"]))},
+        {"key": "Pull Requests Vinculados" if lang == "es" else "Linked Pull Requests", "value": str(total_pr_count)},
         {"key": "Diseño en Figma" if lang == "es" else "Figma Design", "value": figma_val},
     ]
 
@@ -2919,8 +3890,8 @@ def build_single_story_report(
         },
         {
             "label": "PRs Mergeados" if lang == "es" else "Merged PRs",
-            "value": len([p for p in eval_result["prs"] if str(p.get("status", "")).upper() == "MERGED"]),
-            "total": len(eval_result["prs"]),
+            "value": merged_pr_count,
+            "total": total_pr_count,
         },
         {
             "label": "Acciones Pendientes" if lang == "es" else "Pending Actions",
@@ -3061,7 +4032,8 @@ def build_sprint_batch_report(
             "parent": s["parent_key"],
             "flags": s["flags"] or (["DoD completa"] if lang == "es" else ["DoD OK"]),
         })
-        pr_badge = f"{len(s['prs'])} PR(s)" if s["prs"] else ("Sin PR" if lang == "es" else "No PR")
+        s_pr_total = len(s["prs"]) or int((s.get("cf_pr_summary") or {}).get("count") or 0)
+        pr_badge = f"{s_pr_total} PR(s)" if s_pr_total else ("Sin PR" if lang == "es" else "No PR")
         missing_req_label = "FALTANTE" if lang == "es" else "MISSING"
         req_badge = ", ".join(r["key"] for r in s["linked_reqs"]) or missing_req_label
         if s["figma_urls"]:
@@ -3264,6 +4236,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     group.add_argument("--story", help="Single User Story key (e.g. RSV1-29343)")
     group.add_argument("--sprint", help="Sprint number or name to audit all stories in batch (e.g. 183)")
     group.add_argument("--issue-json", type=Path, help="Path to pre-fetched Jira issue JSON (e.g. from MCP or cache). Bypasses direct Jira API calls.")
+    parser.add_argument("--dev-info-json", type=Path, help="Optional path to pre-fetched Bitbucket PR / development info JSON (e.g. from mcp-atlassian jira_get_issue_development_info or Atlassian Remote MCP v2)")
     parser.add_argument("--lang", "--language", choices=["en", "es"], default=None, help="Language for report generation (en = English, es = Español)")
     parser.add_argument("--project", default="RSV1", help="Jira project key (default: RSV1)")
     parser.add_argument("--jira-url", help="Jira base URL")
@@ -3306,6 +4279,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         base_url=str(creds.get("zephyr_base_url") or "https://api.zephyrscale.smartbear.com/v2"),
     )
 
+    pre_fetched_prs: Optional[List[dict]] = None
+    if args.dev_info_json:
+        try:
+            dev_raw = json.loads(args.dev_info_json.read_text(encoding="utf-8-sig"))
+            pre_fetched_prs = normalize_dev_info_prs(dev_raw)
+            log_step(t0, f"🔗 Loaded {len(pre_fetched_prs)} Pull Request(s) from --dev-info-json: {args.dev_info_json}")
+        except Exception as exc:
+            print(f"WARNING: Could not parse --dev-info-json ({args.dev_info_json}): {exc}", file=sys.stderr)
+
+    target_html_name: str = "report.html"
     if args.issue_json:
         log_step(t0, f"📋 Mode: Offline / Pre-fetched Issue JSON Mode -> {args.issue_json}")
         try:
@@ -3313,8 +4296,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:
             print(f"ERROR: Cannot load JSON from {args.issue_json}: {exc}", file=sys.stderr)
             return 1
-        story_key = str(issue_data.get("key") or "UNKNOWN").upper()
-        eval_res = evaluate_single_story(issue_data, jira, zephyr, lang=lang)
+        norm_preview = normalize_issue_payload(issue_data)
+        story_key = str(norm_preview.get("key") or "UNKNOWN").upper()
+        eval_res = evaluate_single_story(issue_data, jira, zephyr, lang=lang, pre_fetched_prs=pre_fetched_prs)
         log_step(
             t0,
             f"📊 Evaluated 21 DoD criteria for {story_key}: "
@@ -3330,6 +4314,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             lang=lang,
         )
         out_json = args.out or (WORKSPACE_ROOT / "reports" / AGENT_ID / story_key / "report-data.json")
+        target_html_name = f"{story_key}-report.html"
     elif args.story:
         story_key = args.story.strip().upper()
         log_step(t0, f"📋 Mode: Single Story Audit -> {story_key}")
@@ -3340,7 +4325,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: Failed to fetch {story_key}: {exc}", file=sys.stderr)
             return 1
 
-        eval_res = evaluate_single_story(issue_data, jira, zephyr, lang=lang)
+        eval_res = evaluate_single_story(issue_data, jira, zephyr, lang=lang, pre_fetched_prs=pre_fetched_prs)
         log_step(
             t0,
             f"📊 Evaluated 21 DoD criteria for {story_key}: "
@@ -3356,6 +4341,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             lang=lang,
         )
         out_json = args.out or (WORKSPACE_ROOT / "reports" / AGENT_ID / story_key / "report-data.json")
+        target_html_name = f"{story_key}-report.html"
         if not args.out:
             update_memory(lastAuditedStory=story_key)
     else:
@@ -3406,6 +4392,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             lang=lang,
         )
         out_json = args.out or (WORKSPACE_ROOT / "reports" / AGENT_ID / f"sprint-{clean_sprint_id}" / "report-data.json")
+        target_html_name = f"sprint-{clean_sprint_id}-report.html"
         if not args.out:
             update_memory(lastAuditedSprint=sprint_val)
 
@@ -3415,9 +4402,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     html_path: Optional[Path] = None
     if not args.no_render and RENDERER_SCRIPT.is_file():
-        log_step(t0, "🎨 Invoking genesis-report-renderer (build_report.py)...")
+        target_html_path = out_json.with_name(target_html_name)
+        log_step(t0, f"🎨 Invoking genesis-report-renderer (build_report.py -> {target_html_path.name})...")
         proc = subprocess.run(
-            [sys.executable, str(RENDERER_SCRIPT), str(out_json)],
+            [sys.executable, str(RENDERER_SCRIPT), str(out_json), "--out", str(target_html_path)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -3429,7 +4417,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if proc.stderr:
                 print(proc.stderr.strip(), file=sys.stderr)
             return proc.returncode
-        html_path = out_json.with_name("report.html")
+        html_path = target_html_path
         log_step(t0, f"✅ HTML Report compiled successfully: {html_path} (engine: {time.perf_counter() - t0:.1f}s)")
 
     print_summary(out_json, html_path)

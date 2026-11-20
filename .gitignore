@@ -1,0 +1,13 @@
+# Environment files (never commit secrets or API tokens)
+.env
+.env.local
+.env.*.local
+
+# Generated audit reports and run clocks
+reports/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
