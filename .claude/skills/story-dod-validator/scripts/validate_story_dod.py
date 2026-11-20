@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 AGENT_ID = "story-dod"
 AGENT_NAME = "User Story DoD Validator"
-AGENT_VERSION = "1.3.0"
+AGENT_VERSION = "1.3.1"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -1474,6 +1474,64 @@ def match_ac_to_testcases(
 # Core Story Evaluator (21 DoD Criteria)
 # ---------------------------------------------------------------------------
 
+def _build_excluded_tc_details(
+    other_tcs: List[Dict[str, Any]],
+    story_key: str,
+    lang: str,
+) -> Tuple[Optional[str], str, List[str]]:
+    """Build plain-language auditor details and warning badge text for test cases
+    linked to a shared Requirement that were excluded because they belong to another Story."""
+    if not other_tcs:
+        return None, "", []
+
+    req_keys = list(dict.fromkeys(str(t.get("linked_via") or "") for t in other_tcs if t.get("linked_via")))
+    req_list = ", ".join(req_keys) or ("el Requerimiento" if lang == "es" else "the Requirement")
+    other_keys_short = ", ".join(t["key"] for t in other_tcs)
+
+    if lang == "es":
+        warning_badge = f"Verificar: {len(other_tcs)} caso(s) de prueba excluidos (otra historia)"
+        note_suffix = (
+            f" Además, asociados al mismo Requerimiento había {len(other_tcs)} caso(s) de prueba adicional(es) "
+            f"({other_keys_short}) que el agente excluyó por pertenecer a otra User Story (se recomienda verificarlo)."
+        )
+        checks = [
+            f"⚠️ Revisión recomendada del auditor — Casos de prueba excluidos en Requerimiento compartido ({req_list}): "
+            f"había {len(other_tcs)} caso(s) de prueba adicional(es) vinculados al mismo Requerimiento, pero el agente "
+            f"determinó que pertenecen a otra User Story porque en Zephyr sus ejecuciones solo aparecen en ciclos de "
+            f"prueba nombrados con otra historia y no con {story_key}. Como esta clasificación automática puede requerir "
+            f"confirmación humana, conviene verificar que efectivamente no correspondan a {story_key}:"
+        ]
+        for t in other_tcs:
+            other_stories = ", ".join(t.get("other_story_keys") or []) or "otra historia"
+            cycles_str = "; ".join(t.get("cycle_names") or []) or "sin nombre de ciclo registrado"
+            checks.append(
+                f"• Excluido: {t['key']} — «{t['name']}» (estado: {t['status']}, vinculado vía {t.get('linked_via')}). "
+                f"El agente lo asignó a {other_stories} porque en Zephyr solo figura ejecutado en: {cycles_str}."
+            )
+    else:
+        warning_badge = f"Verify: {len(other_tcs)} test case(s) excluded (another story)"
+        note_suffix = (
+            f" Additionally, {len(other_tcs)} other test case(s) linked to the same Requirement ({other_keys_short}) "
+            f"were excluded because the agent determined they belong to another User Story (auditor verification recommended)."
+        )
+        checks = [
+            f"⚠️ Auditor verification recommended — Test cases excluded on shared Requirement ({req_list}): "
+            f"{len(other_tcs)} additional test case(s) were linked to the same Requirement, but the agent determined "
+            f"they belong to another User Story because in Zephyr their executions only appear in test cycles named "
+            f"after another story and not {story_key}. Because automated attribution may need human confirmation, "
+            f"please verify that they truly do not belong to {story_key}:"
+        ]
+        for t in other_tcs:
+            other_stories = ", ".join(t.get("other_story_keys") or []) or "another story"
+            cycles_str = "; ".join(t.get("cycle_names") or []) or "no cycle name recorded"
+            checks.append(
+                f"• Excluded: {t['key']} — '{t['name']}' (status: {t['status']}, linked via {t.get('linked_via')}). "
+                f"The agent attributed it to {other_stories} because in Zephyr it was only executed in: {cycles_str}."
+            )
+
+    return warning_badge, note_suffix, checks
+
+
 def evaluate_single_story(
     issue: dict,
     jira: JiraRestClient,
@@ -2655,28 +2713,55 @@ def evaluate_single_story(
 
     # Item 10: Links kept among Requirement, Story, Tests, and Bugs (Story -> Req; Req -> TC)
     spec_10 = CRITERIA_SPECS["10"][lang]
+    active_all_tcs_10 = [t for t in zephyr_tcs if str(t.get("status", "")).lower() != "deprecated"]
+    other_story_tcs_10 = [t for t in active_all_tcs_10 if t.get("story_scope") == "other_story"]
+    applicable_tcs_10 = [t for t in active_all_tcs_10 if t.get("story_scope") != "other_story"]
+    confirmed_tcs_10 = [t for t in applicable_tcs_10 if t.get("story_scope") == "confirmed"]
+    excluded_warn_10, excluded_note_10, excluded_checks_10 = _build_excluded_tc_details(other_story_tcs_10, key, lang)
+
     if linked_reqs:
         req_keys_only = ", ".join(r["key"] for r in linked_reqs)
+        req_details_str = "; ".join(f"{r['key']} ({r['summary']})" for r in linked_reqs)
         if zephyr_tcs or linked_tests_jira:
-            tc_count = len(zephyr_tcs) + len(linked_tests_jira)
-            note_10 = (
-                f"Trazabilidad completa: historia vinculada al Requerimiento {req_keys_only} con {tc_count} Caso(s) de Prueba asociado(s)."
-                if lang == "es" else
-                f"Full traceability: Story linked to Requirement {req_keys_only} with {tc_count} associated Test Case(s)."
-            )
+            applicable_count = len(applicable_tcs_10) + len(linked_tests_jira)
+            total_req_tcs = len(zephyr_tcs) + len(linked_tests_jira)
+            if other_story_tcs_10:
+                note_10 = (
+                    (
+                        f"Trazabilidad verificada: historia vinculada al Requerimiento {req_keys_only} con {applicable_count} Caso(s) de Prueba aplicables a {key} (de {total_req_tcs} en el Requerimiento)."
+                        if lang == "es" else
+                        f"Traceability verified: Story linked to Requirement {req_keys_only} with {applicable_count} Test Case(s) applicable to {key} (out of {total_req_tcs} on the Requirement)."
+                    )
+                    + excluded_note_10
+                )
+            else:
+                note_10 = (
+                    f"Trazabilidad completa: historia vinculada al Requerimiento {req_keys_only} con {total_req_tcs} Caso(s) de Prueba asociado(s)."
+                    if lang == "es" else
+                    f"Full traceability: Story linked to Requirement {req_keys_only} with {total_req_tcs} associated Test Case(s)."
+                )
             checks_10 = [
                 (
-                    f"Vínculo Story -> Requerimiento verificado: {req_keys_only}."
+                    f"Vínculo Story -> Requerimiento verificado en Jira: {key} está vinculada a {req_details_str}."
                     if lang == "es" else
-                    f"Story -> Requirement link verified: {req_keys_only}."
+                    f"Story -> Requirement link verified in Jira: {key} is linked to {req_details_str}."
                 ),
                 (
-                    f"Vínculo Requerimiento -> Casos de Prueba verificado: {tc_count} caso(s) de prueba en Zephyr."
+                    f"Vínculo Requerimiento -> Casos de Prueba verificado en Zephyr: se encontraron {total_req_tcs} caso(s) de prueba asociados al Requerimiento"
+                    + (
+                        f" ({len(confirmed_tcs_10)} confirmado(s) en ciclos de prueba de {key})."
+                        if confirmed_tcs_10 else "."
+                    )
                     if lang == "es" else
-                    f"Requirement -> Test Case link verified: {tc_count} test case(s) in Zephyr."
+                    f"Requirement -> Test Case link verified in Zephyr: found {total_req_tcs} test case(s) associated with the Requirement"
+                    + (
+                        f" ({len(confirmed_tcs_10)} confirmed in {key} test cycles)."
+                        if confirmed_tcs_10 else "."
+                    )
                 ),
             ]
-            criteria_items.append({
+            checks_10.extend(excluded_checks_10)
+            crit_10: Dict[str, Any] = {
                 "id": "10",
                 "group": spec_10["group"],
                 "title": spec_10["title"],
@@ -2684,7 +2769,10 @@ def evaluate_single_story(
                 "status": "pass",
                 "note": note_10,
                 "checks": checks_10,
-            })
+            }
+            if excluded_warn_10:
+                crit_10["warning"] = excluded_warn_10
+            criteria_items.append(crit_10)
         elif not zephyr.available:
             warn_10 = (
                 "Cobertura en Zephyr pendiente de verificación manual"
@@ -2921,6 +3009,24 @@ def evaluate_single_story(
 
         # Test cases applicable to this story (exclude TCs explicitly executed only in another story's test cycle)
         active_tcs = [t for t in active_all_tcs if t.get("story_scope") != "other_story"]
+        excluded_warn, excluded_note, excluded_checks = _build_excluded_tc_details(other_story_tcs, key, lang)
+
+        def _tc_scope_desc(tc_obj: Dict[str, Any]) -> str:
+            via = str(tc_obj.get("linked_via") or "")
+            scope = tc_obj.get("story_scope")
+            if via.upper() == story_key_upper:
+                return "vinculado directamente a la historia" if lang == "es" else "linked directly to the story"
+            if scope == "confirmed":
+                return (
+                    f"vinculado vía Requerimiento {via} y confirmado para {key} mediante sus ciclos de prueba"
+                    if lang == "es" else
+                    f"linked via Requirement {via} and confirmed for {key} via its test cycles"
+                )
+            return (
+                f"vinculado vía Requerimiento {via} (sin ciclo de prueba específico con el ID de {key})"
+                if lang == "es" else
+                f"linked via Requirement {via} (no test cycle specifically naming {key})"
+            )
 
         # Item 12: Test cases created/updated in Jira/Zephyr
         spec_12 = CRITERIA_SPECS["12"][lang]
@@ -2928,28 +3034,23 @@ def evaluate_single_story(
             shown_tcs = active_tcs if active_tcs else deprecated_tcs
             tc_list_str = ", ".join(f"{t['key']} ({t['status']})" for t in shown_tcs)
             note_12 = (
-                f"Se encontraron {len(shown_tcs)} Caso(s) de Prueba en Zephyr aplicables a {key}: {tc_list_str}."
-                if lang == "es" else
-                f"Found {len(shown_tcs)} Zephyr Test Case(s) applicable to {key}: {tc_list_str}."
+                (
+                    f"Se encontraron {len(shown_tcs)} Caso(s) de Prueba en Zephyr aplicables a {key}: {tc_list_str}."
+                    if lang == "es" else
+                    f"Found {len(shown_tcs)} Zephyr Test Case(s) applicable to {key}: {tc_list_str}."
+                )
+                + excluded_note
             )
             checks_12 = [
                 (
-                    f"{t['key']} (vinculado vía {t.get('linked_via')}): {t['name']} — estado: {t['status']}."
+                    f"{t['key']} ({_tc_scope_desc(t)}): {t['name']} — estado: {t['status']}."
                     if lang == "es" else
-                    f"{t['key']} (linked via {t.get('linked_via')}): {t['name']} — status: {t['status']}."
+                    f"{t['key']} ({_tc_scope_desc(t)}): {t['name']} — status: {t['status']}."
                 )
                 for t in shown_tcs
             ]
-            if other_story_tcs:
-                other_desc = ", ".join(
-                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
-                )
-                checks_12.append(
-                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba del requerimiento compartido asignados en ciclos de otra historia: {other_desc}."
-                    if lang == "es" else
-                    f"Excluded {len(other_story_tcs)} test case(s) on the shared Requirement scoped to another story's Test Cycle: {other_desc}."
-                )
-            criteria_items.append({
+            checks_12.extend(excluded_checks)
+            crit_12: Dict[str, Any] = {
                 "id": "12",
                 "group": spec_12["group"],
                 "title": spec_12["title"],
@@ -2957,7 +3058,23 @@ def evaluate_single_story(
                 "status": "pass",
                 "note": note_12,
                 "checks": checks_12,
-            })
+            }
+            if excluded_warn:
+                crit_12["warning"] = excluded_warn
+                other_keys_act = ", ".join(
+                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
+                )
+                actions.append({
+                    "group": "manual",
+                    "criterion": "12",
+                    "text": (
+                        f"Verificar los {len(other_story_tcs)} caso(s) de prueba del Requerimiento compartido que el agente excluyó por pertenecer a otra User Story ({other_keys_act}), para confirmar que efectivamente no corresponden a {key}."
+                        if lang == "es" else
+                        f"Verify the {len(other_story_tcs)} test case(s) on the shared Requirement excluded by the agent as belonging to another User Story ({other_keys_act}), to confirm they do not apply to {key}."
+                    ),
+                    "issues": [key],
+                })
+            criteria_items.append(crit_12)
         elif other_story_tcs:
             other_desc = ", ".join(
                 f"{t['key']} (ciclo de {'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
@@ -3034,23 +3151,18 @@ def evaluate_single_story(
 
         if active_tcs and not unapproved_tcs:
             note_13 = (
-                f"Los {len(active_tcs)} Caso(s) de Prueba activos en Zephyr están revisados y aprobados ('Approved')."
-                if lang == "es" else
-                f"All {len(active_tcs)} active Zephyr Test Case(s) are reviewed and in 'Approved' status."
+                (
+                    f"Los {len(active_tcs)} Caso(s) de Prueba activos en Zephyr están revisados y aprobados ('Approved')."
+                    if lang == "es" else
+                    f"All {len(active_tcs)} active Zephyr Test Case(s) are reviewed and in 'Approved' status."
+                )
+                + excluded_note
             )
             checks_13 = [
                 (f"{t['key']} ({t['name']}): estado {t['status']}." if lang == "es" else f"{t['key']} ({t['name']}): status {t['status']}.")
                 for t in active_tcs
             ]
-            if other_story_tcs:
-                other_keys = ", ".join(
-                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
-                )
-                checks_13.append(
-                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba asignados por Test Cycle a otra historia: {other_keys}."
-                    if lang == "es" else
-                    f"Ignored {len(other_story_tcs)} test case(s) assigned by Test Cycle to another story: {other_keys}."
-                )
+            checks_13.extend(excluded_checks)
             if deprecated_tcs:
                 dep_keys = ", ".join(t["key"] for t in deprecated_tcs)
                 checks_13.append(
@@ -3058,7 +3170,7 @@ def evaluate_single_story(
                     if lang == "es" else
                     f"Ignored {len(deprecated_tcs)} deprecated test case(s): {dep_keys}."
                 )
-            criteria_items.append({
+            crit_13: Dict[str, Any] = {
                 "id": "13",
                 "group": spec_13["group"],
                 "title": spec_13["title"],
@@ -3066,15 +3178,21 @@ def evaluate_single_story(
                 "status": "pass",
                 "note": note_13,
                 "checks": checks_13,
-            })
+            }
+            if excluded_warn:
+                crit_13["warning"] = excluded_warn
+            criteria_items.append(crit_13)
         elif confirmed_tcs and not unapproved_confirmed and unapproved_unscoped:
             unscoped_str = ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_unscoped)
             note_13 = (
-                f"Los {len(confirmed_tcs)} Caso(s) de Prueba confirmados en ciclos de {key} están en estado 'Approved'. "
-                f"Hay {len(unapproved_unscoped)} caso(s) en el Requerimiento compartido sin ciclo de esta historia ({unscoped_str}): confirmar con QA si pertenecen a otra historia."
-                if lang == "es" else
-                f"All {len(confirmed_tcs)} Test Case(s) confirmed in {key} Test Cycles are 'Approved'. "
-                f"{len(unapproved_unscoped)} test case(s) on the shared Requirement have no cycle for this story ({unscoped_str}): confirm with QA if they belong to another story."
+                (
+                    f"Los {len(confirmed_tcs)} Caso(s) de Prueba confirmados en ciclos de {key} están en estado 'Approved'. "
+                    f"Hay {len(unapproved_unscoped)} caso(s) en el Requerimiento compartido sin ciclo de esta historia ({unscoped_str}): confirmar con QA si pertenecen a otra historia."
+                    if lang == "es" else
+                    f"All {len(confirmed_tcs)} Test Case(s) confirmed in {key} Test Cycles are 'Approved'. "
+                    f"{len(unapproved_unscoped)} test case(s) on the shared Requirement have no cycle for this story ({unscoped_str}): confirm with QA if they belong to another story."
+                )
+                + excluded_note
             )
             checks_13 = [
                 (
@@ -3090,16 +3208,8 @@ def evaluate_single_story(
                     if lang == "es" else
                     f"⚠️ Manual review (shared Requirement {t.get('linked_via')}): {t['key']} ({t['name']}) is in '{t['status']}' status and has no Test Cycle naming {key}. Confirm whether it belongs to another story."
                 )
-            if other_story_tcs:
-                other_keys = ", ".join(
-                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
-                )
-                checks_13.append(
-                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba asignados por Test Cycle a otra historia: {other_keys}."
-                    if lang == "es" else
-                    f"Ignored {len(other_story_tcs)} test case(s) assigned by Test Cycle to another story: {other_keys}."
-                )
-            criteria_items.append({
+            checks_13.extend(excluded_checks)
+            crit_13_m: Dict[str, Any] = {
                 "id": "13",
                 "group": spec_13["group"],
                 "title": spec_13["title"],
@@ -3109,7 +3219,10 @@ def evaluate_single_story(
                 "note": note_13,
                 "checks": checks_13,
                 "issues": [key],
-            })
+            }
+            if excluded_warn:
+                crit_13_m["warning"] = excluded_warn
+            criteria_items.append(crit_13_m)
             act_text_13_manual = (
                 f"Confirmar con QA si los casos de prueba {unscoped_str} (vinculados al Requerimiento compartido) pertenecen a otra historia o si deben aprobarse e incluirse en un Test Cycle de {key}."
                 if lang == "es" else
@@ -3124,17 +3237,23 @@ def evaluate_single_story(
         else:
             if lang == "es":
                 note_13 = (
-                    f"{len(unapproved_tcs)} de {len(active_tcs)} Caso(s) de Prueba aún no están en estado 'Approved': "
-                    + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
-                    if active_tcs
-                    else "No hay casos de prueba vinculados a esta historia para verificar su aprobación."
+                    (
+                        f"{len(unapproved_tcs)} de {len(active_tcs)} Caso(s) de Prueba aún no están en estado 'Approved': "
+                        + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
+                        if active_tcs
+                        else "No hay casos de prueba vinculados a esta historia para verificar su aprobación."
+                    )
+                    + excluded_note
                 )
             else:
                 note_13 = (
-                    f"{len(unapproved_tcs)} of {len(active_tcs)} Test Case(s) are not yet 'Approved': "
-                    + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
-                    if active_tcs
-                    else "No linked Test Cases found for this story to verify approval status."
+                    (
+                        f"{len(unapproved_tcs)} of {len(active_tcs)} Test Case(s) are not yet 'Approved': "
+                        + ", ".join(f"{t['key']} ({t['status']})" for t in unapproved_tcs)
+                        if active_tcs
+                        else "No linked Test Cases found for this story to verify approval status."
+                    )
+                    + excluded_note
                 )
             checks_13 = [
                 (f"{t['key']} ({t['name']}): estado actual {t['status']}." if lang == "es" else f"{t['key']} ({t['name']}): current status {t['status']}.")
@@ -3144,7 +3263,8 @@ def evaluate_single_story(
                 if lang == "es" else
                 ["No test cases recorded in Zephyr for this story."]
             )
-            criteria_items.append({
+            checks_13.extend(excluded_checks)
+            crit_13_f: Dict[str, Any] = {
                 "id": "13",
                 "group": spec_13["group"],
                 "title": spec_13["title"],
@@ -3153,7 +3273,10 @@ def evaluate_single_story(
                 "note": note_13,
                 "checks": checks_13,
                 "issues": [key],
-            })
+            }
+            if excluded_warn:
+                crit_13_f["warning"] = excluded_warn
+            criteria_items.append(crit_13_f)
             if unapproved_tcs:
                 act_text_13 = (
                     f"Revisar y pasar a estado 'Approved' los Casos de Prueba de Zephyr asociados a {key}: {', '.join(t['key'] for t in unapproved_tcs)}."
@@ -3192,9 +3315,12 @@ def evaluate_single_story(
 
         if eval_tcs and not failed_or_unexec_tcs:
             note_14 = (
-                f"Los {len(eval_tcs)} Caso(s) de Prueba activos cuentan con ejecución aprobada en Zephyr."
-                if lang == "es" else
-                f"All {len(eval_tcs)} active Test Case(s) have passing executions in Zephyr."
+                (
+                    f"Los {len(eval_tcs)} Caso(s) de Prueba activos cuentan con ejecución aprobada en Zephyr."
+                    if lang == "es" else
+                    f"All {len(eval_tcs)} active Test Case(s) have passing executions in Zephyr."
+                )
+                + excluded_note
             )
             checks_14 = [
                 (
@@ -3208,16 +3334,8 @@ def evaluate_single_story(
                 )
                 for tk, ex in passed_tcs
             ]
-            if other_story_tcs:
-                other_keys = ", ".join(
-                    f"{t['key']} ({'/'.join(t.get('other_story_keys') or [])})" for t in other_story_tcs
-                )
-                checks_14.append(
-                    f"Se omitieron {len(other_story_tcs)} caso(s) de prueba ejecutados en Test Cycles de otra historia: {other_keys}."
-                    if lang == "es" else
-                    f"Ignored {len(other_story_tcs)} test case(s) executed in another story's Test Cycles: {other_keys}."
-                )
-            criteria_items.append({
+            checks_14.extend(excluded_checks)
+            crit_14: Dict[str, Any] = {
                 "id": "14",
                 "group": spec_14["group"],
                 "title": spec_14["title"],
@@ -3225,11 +3343,18 @@ def evaluate_single_story(
                 "status": "pass",
                 "note": note_14,
                 "checks": checks_14,
-            })
+            }
+            if excluded_warn:
+                crit_14["warning"] = excluded_warn
+            criteria_items.append(crit_14)
+
             note_15 = (
-                f"Evidencia de ejecución verificada en Zephyr para los {len(eval_tcs)} Caso(s) de Prueba activos."
-                if lang == "es" else
-                f"Execution evidence verified in Zephyr for all {len(eval_tcs)} active Test Case(s)."
+                (
+                    f"Evidencia de ejecución verificada en Zephyr para los {len(eval_tcs)} Caso(s) de Prueba activos."
+                    if lang == "es" else
+                    f"Execution evidence verified in Zephyr for all {len(eval_tcs)} active Test Case(s)."
+                )
+                + excluded_note
             )
             checks_15 = [
                 (
@@ -3241,7 +3366,8 @@ def evaluate_single_story(
                 )
                 for tk, ex in passed_tcs
             ]
-            criteria_items.append({
+            checks_15.extend(excluded_checks)
+            crit_15: Dict[str, Any] = {
                 "id": "15",
                 "group": spec_15["group"],
                 "title": spec_15["title"],
@@ -3249,15 +3375,21 @@ def evaluate_single_story(
                 "status": "pass",
                 "note": note_15,
                 "checks": checks_15,
-            })
+            }
+            if excluded_warn:
+                crit_15["warning"] = excluded_warn
+            criteria_items.append(crit_15)
         elif confirmed_tcs and not failed_confirmed_tcs and failed_unscoped_tcs:
             unscoped_exec_str = ", ".join(f"{t['key']} ({t['status']})" for t in failed_unscoped_tcs)
             note_manual_14 = (
-                f"Los {len(confirmed_tcs)} Caso(s) de Prueba en los Test Cycles de {key} fueron ejecutados y aprobados (PASS). "
-                f"Quedan {len(failed_unscoped_tcs)} caso(s) en el Requerimiento compartido sin ejecución en un ciclo de {key} ({unscoped_exec_str}): confirmar si pertenecen a otra historia."
-                if lang == "es" else
-                f"All {len(confirmed_tcs)} Test Case(s) in {key} Test Cycles have passing (PASS) executions. "
-                f"{len(failed_unscoped_tcs)} test case(s) on the shared Requirement have no execution in a {key} cycle ({unscoped_exec_str}): confirm if they belong to another story."
+                (
+                    f"Los {len(confirmed_tcs)} Caso(s) de Prueba en los Test Cycles de {key} fueron ejecutados y aprobados (PASS). "
+                    f"Quedan {len(failed_unscoped_tcs)} caso(s) en el Requerimiento compartido sin ejecución en un ciclo de {key} ({unscoped_exec_str}): confirmar si pertenecen a otra historia."
+                    if lang == "es" else
+                    f"All {len(confirmed_tcs)} Test Case(s) in {key} Test Cycles have passing (PASS) executions. "
+                    f"{len(failed_unscoped_tcs)} test case(s) on the shared Requirement have no execution in a {key} cycle ({unscoped_exec_str}): confirm if they belong to another story."
+                )
+                + excluded_note
             )
             checks_manual_14 = [
                 (
@@ -3273,7 +3405,8 @@ def evaluate_single_story(
                     if lang == "es" else
                     f"⚠️ Manual review (shared Requirement {t.get('linked_via')}): {t['key']} ({t['name']}, status: {t['status']}) has no executions in a Test Cycle naming {key}. Confirm with QA if it belongs to another story."
                 )
-            criteria_items.append({
+            checks_manual_14.extend(excluded_checks)
+            crit_14_m: Dict[str, Any] = {
                 "id": "14",
                 "group": spec_14["group"],
                 "title": spec_14["title"],
@@ -3283,8 +3416,8 @@ def evaluate_single_story(
                 "note": note_manual_14,
                 "checks": checks_manual_14,
                 "issues": [key],
-            })
-            criteria_items.append({
+            }
+            crit_15_m: Dict[str, Any] = {
                 "id": "15",
                 "group": spec_15["group"],
                 "title": spec_15["title"],
@@ -3292,9 +3425,14 @@ def evaluate_single_story(
                 "status": "manual",
                 "reason": "by-design",
                 "note": note_manual_14,
-                "checks": checks_manual_14,
+                "checks": list(checks_manual_14),
                 "issues": [key],
-            })
+            }
+            if excluded_warn:
+                crit_14_m["warning"] = excluded_warn
+                crit_15_m["warning"] = excluded_warn
+            criteria_items.append(crit_14_m)
+            criteria_items.append(crit_15_m)
             act_text_14_manual = (
                 f"Confirmar con QA si los casos de prueba sin ciclo de {key} ({unscoped_exec_str}) corresponden a otra historia que comparte el Requerimiento o si resta ejecutarlos para {key}."
                 if lang == "es" else
@@ -3309,9 +3447,12 @@ def evaluate_single_story(
         else:
             missing_str = ", ".join(failed_or_unexec_tcs) if failed_or_unexec_tcs else ("ningún caso de prueba vinculado a esta historia" if lang == "es" else "no test cases linked to this story")
             note_fail = (
-                f"Falta evidencia de ejecución aprobada (PASS) en Zephyr ({missing_str})."
-                if lang == "es" else
-                f"Missing passing (PASS) execution evidence in Zephyr ({missing_str})."
+                (
+                    f"Falta evidencia de ejecución aprobada (PASS) en Zephyr ({missing_str})."
+                    if lang == "es" else
+                    f"Missing passing (PASS) execution evidence in Zephyr ({missing_str})."
+                )
+                + excluded_note
             )
             checks_fail = [
                 (
@@ -3325,7 +3466,8 @@ def evaluate_single_story(
                     "No linked test cases in Zephyr for this story to verify execution records."
                 )
             ]
-            criteria_items.append({
+            checks_fail.extend(excluded_checks)
+            crit_14_f: Dict[str, Any] = {
                 "id": "14",
                 "group": spec_14["group"],
                 "title": spec_14["title"],
@@ -3334,17 +3476,22 @@ def evaluate_single_story(
                 "note": note_fail,
                 "checks": checks_fail,
                 "issues": [key],
-            })
-            criteria_items.append({
+            }
+            crit_15_f: Dict[str, Any] = {
                 "id": "15",
                 "group": spec_15["group"],
                 "title": spec_15["title"],
                 "description": spec_15["description"],
                 "status": "fail",
                 "note": note_fail,
-                "checks": checks_fail,
+                "checks": list(checks_fail),
                 "issues": [key],
-            })
+            }
+            if excluded_warn:
+                crit_14_f["warning"] = excluded_warn
+                crit_15_f["warning"] = excluded_warn
+            criteria_items.append(crit_14_f)
+            criteria_items.append(crit_15_f)
             act_text_14 = (
                 f"Ejecutar los casos de prueba en pre-staging y registrar el resultado aprobado (PASS) en Zephyr para {key}."
                 if lang == "es" else
@@ -3764,6 +3911,21 @@ def build_single_story_report(
                 status_cov,
             ])
     else:
+        applicable_trace_tcs = [
+            t["key"] for t in eval_result["zephyr_tcs"]
+            if str(t.get("status", "")).lower() != "deprecated" and t.get("story_scope") != "other_story"
+        ]
+        excluded_trace_tcs = [
+            t["key"] for t in eval_result["zephyr_tcs"]
+            if str(t.get("status", "")).lower() != "deprecated" and t.get("story_scope") == "other_story"
+        ]
+        tc_cell = ", ".join(applicable_trace_tcs) or ("Ninguno" if lang == "es" else "None")
+        if excluded_trace_tcs:
+            tc_cell += (
+                f" (excluidos de otra historia: {', '.join(excluded_trace_tcs)})"
+                if lang == "es" else
+                f" (excluded from another story: {', '.join(excluded_trace_tcs)})"
+            )
         trace_rows.append([
             req_str,
             "N/A",
@@ -3772,7 +3934,7 @@ def build_single_story_report(
                 if lang == "es" else
                 "No explicit Acceptance Criteria bullets extracted from Story description"
             ),
-            ", ".join(t["key"] for t in eval_result["zephyr_tcs"]) or ("Ninguno" if lang == "es" else "None"),
+            tc_cell,
             "Sin Criterios de Aceptación" if lang == "es" else "Missing ACs",
         ])
 
@@ -3900,6 +4062,35 @@ def build_single_story_report(
         },
     ]
 
+    report_notices: List[Dict[str, str]] = []
+    excluded_notice_tcs = [
+        t for t in eval_result["zephyr_tcs"]
+        if str(t.get("status", "")).lower() != "deprecated" and t.get("story_scope") == "other_story"
+    ]
+    if excluded_notice_tcs:
+        excl_desc = ", ".join(
+            f"{t['key']} ({'/'.join(t.get('other_story_keys') or []) or ('otra historia' if lang == 'es' else 'another story')})"
+            for t in excluded_notice_tcs
+        )
+        report_notices.append({
+            "level": "warning",
+            "title": (
+                f"Casos de prueba excluidos por pertenecer a otra historia ({len(excluded_notice_tcs)})"
+                if lang == "es" else
+                f"Test cases excluded as belonging to another story ({len(excluded_notice_tcs)})"
+            ),
+            "text": (
+                f"Asociados al mismo Requerimiento había {len(excluded_notice_tcs)} caso(s) de prueba adicional(es) "
+                f"({excl_desc}), pero el agente validó que pertenecen a otra User Story porque en Zephyr solo fueron "
+                f"ejecutados en ciclos de prueba de esa otra historia. Revise el detalle en los criterios 10 y 12–15 "
+                f"para confirmar que efectivamente no corresponden a {key}."
+                if lang == "es" else
+                f"Linked to the same Requirement, {len(excluded_notice_tcs)} additional test case(s) ({excl_desc}) "
+                f"were excluded because the agent determined they belong to another User Story based on their Zephyr "
+                f"test cycles. Review the details in criteria 10 and 12–15 to confirm they do not apply to {key}."
+            ),
+        })
+
     return {
         "schema_version": "1.0",
         "meta": {
@@ -3927,7 +4118,7 @@ def build_single_story_report(
             "headline": headline,
             "kpis": kpis,
         },
-        "notices": [],
+        "notices": report_notices,
         "sections": sections,
         "actions": actions_with_practice,
     }
