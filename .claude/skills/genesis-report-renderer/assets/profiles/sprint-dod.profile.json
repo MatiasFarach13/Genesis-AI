@@ -6,8 +6,15 @@
     "aside": ["distribution", "@actions", "@sources"]
   },
   "action_groups": {
-    "manual": "Verificación manual",
-    "fix": "Correcciones detectadas por el agente",
-    "practice": "Buenas prácticas (opcional)"
+    "en": {
+      "manual": "Manual Verifications",
+      "fix": "Corrections Detected by Agent",
+      "practice": "Best Practices (Optional)"
+    },
+    "es": {
+      "manual": "Verificación manual",
+      "fix": "Correcciones detectadas por el agente",
+      "practice": "Buenas prácticas (opcional)"
+    }
   }
 }

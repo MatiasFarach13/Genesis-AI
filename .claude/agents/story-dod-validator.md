@@ -34,7 +34,7 @@ The reported execution time is end-to-end: from this command until the HTML is w
 Read `.claude/memories/repo/story-dod.json` (tiny) for defaults: `lastAuditedStory`, `lastAuditedSprint`, `language`.
 Ask in a single round with the ask-questions tool (skip what the user already said):
 1. **Target** — options: last audited story and last audited sprint (if present); freeform: a story key (`RSV1-29343`) or a sprint number (`186`).
-2. **Language** — `Español` / `English`; recommended = memory `language` (default `es`).
+2. **Language** — `English` / `Español`; recommended = memory `language` (default `en`).
 
 # Step 2 — Run the engine (Track 2: Direct REST, default)
 

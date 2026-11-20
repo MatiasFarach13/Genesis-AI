@@ -21,31 +21,46 @@ Never guess the sprint or board. Collect both with a single interactive question
    python .claude/skills/genesis-report-renderer/scripts/run_clock.py start sprint-dod
    ```
    The renderer uses that clock to report the real end-to-end execution time (from agent start until the HTML is written). Never estimate or compute durations yourself.
-2. **Progress logs**: at each phase transition, emit a short progress line in Spanish (without inventing durations):
-   - `🚀 Iniciando Sprint DOD Validator...`
-   - `📋 Parámetros confirmados: Tablero <board>, Sprint <n>`
-   - `🔍 Consultando Jira (issues, historial y Pull Requests) y Confluence...`
-   - `📊 Evaluación de los 7 criterios de la DoD completada`
-   - `📝 Generando report-data.json...`
-   - `🎨 Ejecutando skill genesis-report-renderer (build_report.py)...`
-   - `✅ Reporte HTML compilado. Tiempo total: <the "agent execution" value printed by build_report.py>`
+2. **Progress logs**: at each phase transition, emit a short progress line in the selected language (default English, without inventing durations), e.g.:
+   - `🚀 Starting Sprint DOD Validator...`
+   - `📋 Parameters confirmed: Board <board>, Sprint <n>, Language <en|es>`
+   - `🔍 Querying Jira (issues, history, and Pull Requests) and Confluence...`
+   - `📊 Evaluation of the 7 DoD criteria completed`
+   - `📝 Generating report-data.json...`
+   - `🎨 Running genesis-report-renderer skill (build_report.py)...`
+   - `✅ HTML report compiled. Total time: <the "agent execution" value printed by build_report.py>`
 
-### Interactive Board and Sprint Selection
-1. Silently check `/memories/repo/` for a previously remembered Jira board/project key from an earlier run of this agent.
+### Interactive Board, Sprint & Language Selection
+1. Silently check `/memories/repo/sprint-dod.json` for a previously remembered Jira board/project key and preferred `language` (`en` default) from an earlier run of this agent.
 2. If a board is remembered, query Jira for that board's active sprint plus the last 5 closed sprints, so they can be offered as quick-pick options.
-3. Ask both questions in one round:
+3. Ask all three questions in one single round (skip any parameter the user already specified):
    - **Board/Project** — if a board was remembered, offer it as the recommended option; always allow freeform text so the user can type a different board/project key.
    - **Sprint** — if sprints were fetched in step 2, list them as options (label = sprint number, description = state + dates); always allow freeform text so the user can type any sprint number/ID directly, including ones not in the list.
-4. If the user leaves an answer empty or ambiguous, ask again directly — do not assume a default.
-5. Once the board is confirmed, save/update it in `/memories/repo/` (silent, local, non-destructive) so the next run can offer it as a shortcut.
+   - **Language** — `English` / `Español`; recommended = memory `language` (default `en`).
+4. If the user leaves Board or Sprint empty or ambiguous, ask again directly — do not assume a default for them. If Language is omitted, default to `en`.
+5. Once confirmed, save/update the board and `language` in `/memories/repo/sprint-dod.json` (silent, local, non-destructive) so the next run can offer them as shortcuts.
 
 ---
 
 # Step 2 — Sprint Definition of Done Checklist (Source of Truth)
 
-This is the authoritative checklist for this agent. Evaluate the sprint against each of these items using the interpretation rules in Step 4. Use the **report title** and **DoD description** (Spanish, plain language) verbatim in the report:
+This is the authoritative checklist for this agent. Evaluate the sprint against each of these items using the interpretation rules in Step 4. Use the **Report title** and **DoD description** matching the selected report language (`en` by default, or `es` if Spanish was chosen) verbatim in the report:
 
-| # | DoD item (source) | Report title | DoD description (for `description`) |
+### English (`en`, default)
+
+| # | DoD item (source) | Report title (`en`) | DoD description (`en`, for `description`) |
+|---|---|---|---|
+| 1 | Sprint review meeting conducted | Sprint review meeting conducted | At the end of the sprint, the team holds the sprint review meeting. As evidence, the review date and recording link are added to the Jira Sprint Goal. Optional best practice (not yet mandatory): add 2–3 bullets with concrete review findings (items accepted with reservations, PO feedback) for a real quality signal beyond attendance proof. |
+| 2 | Build used at sprint review kept until GA | Installer build shown at review is stored | The installer build used during the sprint review must be preserved until General Availability (GA), tagged with the sprint number. |
+| 3 | Stories accepted at review marked Closed in Jira | Accepted stories are Closed in Jira | Every story or task accepted at the review must be transitioned to Closed in Jira; for Stories, closure must be performed by the PO or PO Proxy. |
+| 4 | Stories not closed deferred to next sprint or product backlog | Unfinished work moved out of the sprint | Unfinished items not closed must be moved to the next sprint or returned to the product backlog. Items assigned to a future sprint (> audited sprint) are considered OK (green with deferral notice). |
+| 5 | Sprint retrospective conducted | Sprint retrospective conducted | The team conducts the sprint retrospective on a Confluence whiteboard, one per sprint. |
+| 6 | All PRs related to issues of the sprint are closed | Sprint Pull Requests are closed | No Pull Request linked to sprint stories or tasks may remain open, and each eligible deliverable must have at least one merged PR. |
+| 7 | Sprint completed in Jira | Sprint is completed in Jira | The sprint must be marked as completed (closed) in Jira. |
+
+### Spanish (`es`)
+
+| # | DoD item (source) | Report title (`es`) | DoD description (`es`, for `description`) |
 |---|---|---|---|
 | 1 | Sprint review meeting conducted | Se realizó la sprint review | Al cierre del sprint se hace la reunión de review con el equipo. Como evidencia, en el Sprint Goal de Jira se carga la fecha de la review y el link a la grabación. Buena práctica adicional (todavía no obligatoria): sumar 2-3 bullets con hallazgos concretos de la review (qué se aceptó con reservas, qué feedback dio el PO) — da una señal real de calidad, no solo la prueba de que la reunión pasó. |
 | 2 | Build used at sprint review kept until GA | El instalador mostrado en la review está guardado | El build del instalador que se usó en la review tiene que quedar guardado hasta la salida a producción (GA), identificado con el número del sprint. |
@@ -176,28 +191,29 @@ The sprint is **DONE** once every action is checked off by a human (the HTML che
 Write the run as data following the contract of the `genesis-report-renderer` skill (`references/report-contract.md`). Never write HTML or a Markdown report.
 
 - Path: `reports/sprint-dod/<sprint-number>/report-data.json` (create folders if missing; overwrite if it exists).
-- `meta`: `agent_id: "sprint-dod"`, `agent_name: "Sprint DOD Validator"`, `agent_version: "2.7"`, `team: "AI Governance"`, `run_id: "sprint-dod-<n>-<YYYYMMDDTHHmm>"`, `generated_at` (ISO 8601 with offset; `started_at`, `execution_time_seconds`, and `execution_time` are populated automatically by `build_report.py` from the Step 1 run clock — do not invent them), `language: "es"`, `scope: { type: "sprint", id: "<n>", label: "Sprint <n>", board: "<board name (id)>", project: "<key>" }`, `jira_base_url` (`https://<site>/browse/` of the Jira site used; omit if unknown).
-- `meta.sources`: `Jira` (issues + changelog), `Confluence` (retro search), `Jenkins`, `Bitbucket/PRs`, each with `kind`, `status` (`ok | partial | unavailable | error`) and a user-friendly `reason` when not `ok`. Jira is `ok` unless a call failed. Confluence is `ok` whenever the retro search call succeeded (regardless of whether a page was found) and `error` only if the call itself failed. Jenkins is `unavailable` — no tool exists for it today. `Bitbucket/PRs` is `ok` whenever `customfield_10000` could be read with the connected Jira tool (see Step 4 item 6); mark it `unavailable` only if that connected tool does not return the field at all.
-- `summary`: `status` = `pass` if all 7 items pass, `fail` if any item fails, otherwise `warning`. Active tasks deferred to future sprints and `Resolved`/`Verified` items awaiting formal closure do **not** fail Criterion 4 or flag the sprint as incomplete. `headline` one line (e.g. `"El Sprint 185 todavía no cumple la Definition of Done"`). `kpis`: `Ítems de la DoD aprobados` (value/7), `Issues cerradas` (value/total), `Acciones pendientes` (count of `manual`+`fix` actions only — never count `practice` actions here, `status: "fail"` if > 0).
-- `notices`: informative banners, no action required. Always include:
-  `{ "level": "info", "title": "Dónde se guardan los instaladores (en definición)", "text": "La DoD dice que el instalador se guarda en Artifactory, pero hoy se guarda en Jenkins. Lo estamos definiendo con los PO de Genesis y, cuando la integración con Jenkins esté lista, este control se va a automatizar. Por ahora no tenés que hacer nada con esto." }`
+- `meta`: `agent_id: "sprint-dod"`, `agent_name: "Sprint DOD Validator"`, `agent_version: "2.8"`, `team: "AI Governance"`, `run_id: "sprint-dod-<n>-<YYYYMMDDTHHmm>"`, `generated_at` (ISO 8601 with offset; `started_at`, `execution_time_seconds`, and `execution_time` are populated automatically by `build_report.py` from the Step 1 run clock — do not invent them), `language: "<en|es>"` (use `"en"` by default, or `"es"` if Spanish was selected in Step 1), `scope: { type: "sprint", id: "<n>", label: "Sprint <n>", board: "<board name (id)>", project: "<key>" }`, `jira_base_url` (`https://<site>/browse/` of the Jira site used; omit if unknown).
+- `meta.sources`: `Jira` (issues + changelog), `Confluence` (retro search), `Jenkins`, `Bitbucket/PRs`, each with `kind`, `status` (`ok | partial | unavailable | error`) and a user-friendly `reason` in the selected report language when not `ok`. Jira is `ok` unless a call failed. Confluence is `ok` whenever the retro search call succeeded (regardless of whether a page was found) and `error` only if the call itself failed. Jenkins is `unavailable` — no tool exists for it today. `Bitbucket/PRs` is `ok` whenever `customfield_10000` could be read with the connected Jira tool (see Step 4 item 6); mark it `unavailable` only if that connected tool does not return the field at all.
+- `summary`: `status` = `pass` if all 7 items pass, `fail` if any item fails, otherwise `warning`. Active tasks deferred to future sprints and `Resolved`/`Verified` items awaiting formal closure do **not** fail Criterion 4 or flag the sprint as incomplete. `headline` one line in the selected report language (e.g. `en`: `"Sprint 185 does not yet meet the Definition of Done"` / `es`: `"El Sprint 185 todavía no cumple la Definition of Done"`). `kpis` in the selected report language: `DoD items passed` / `Ítems de la DoD aprobados` (value/7), `Closed issues` / `Issues cerradas` (value/total), `Pending actions` / `Acciones pendientes` (count of `manual`+`fix` actions only — never count `practice` actions here, `status: "fail"` if > 0).
+- `notices`: informative banners in the selected report language, no action required. Always include:
+  - `en`: `{ "level": "info", "title": "Where installers are stored (under definition)", "text": "The DoD mentions Artifactory, while installers are currently stored in Jenkins. This is being aligned with the Genesis POs and, once the Jenkins integration is ready, this check will be automated. No action is required from you right now." }`
+  - `es`: `{ "level": "info", "title": "Dónde se guardan los instaladores (en definición)", "text": "La DoD dice que el instalador se guarda en Artifactory, pero hoy se guarda en Jenkins. Lo estamos definiendo con los PO de Genesis y, cuando la integración con Jenkins esté lista, este control se va a automatizar. Por ahora no tenés que hacer nada con esto." }`
 - `sections`, in this order:
   1. `{ "id": "sprint-dod", "type": "criteria", "title": "Sprint Definition of Done" }` — the 7 items of Step 2, each with:
-     - `id` "1"…"7", `title` and `description` from the Step 2 table (verbatim).
+     - `id` "1"…"7", `title` and `description` from the Step 2 table matching the selected report language (`en` default or `es`) verbatim.
      - `status` (`pass | fail | manual`); `reason` (`by-design | tool-unavailable`) for every `manual`.
-     - `warning`: (optional) When Criterion 4 has active tasks rolled over to future sprints (`> N`) and/or `Resolved`/`Verified` items awaiting formal closure, include a concise non-blocking notice here (e.g. `"56 tareas activas postergadas a sprints futuros"` or `"76 tareas activas postergadas; 29 terminadas esperan cierre"`).
-     - `note`: the result in one or two plain Spanish sentences, with key numbers (max ~35 words). No technical jargon or Jira field IDs.
-     - `checks`: 2–5 clear Spanish bullets explaining in natural, business-friendly language what the agent verified and what it found (for Criterion 3 when failing, include the explicit breakdown per issue type: `Story`, `Task`, `Sub-task`, others). Never include raw field names (`customfield_10000`, `customfield_10021`, `dev-status`, `dev-info`) or cryptic shorthand (`Closed=46 | No-Closed=106`).
+     - `warning`: (optional) When Criterion 4 has active tasks rolled over to future sprints (`> N`) and/or `Resolved`/`Verified` items awaiting formal closure, include a concise non-blocking notice in the selected language (e.g. `en`: `"56 active tasks deferred to future sprints"` / `es`: `"56 tareas activas postergadas a sprints futuros"`).
+     - `note`: the result in one or two plain sentences in the selected report language (`en` default or `es`), with key numbers (max ~35 words). No technical jargon or Jira field IDs.
+     - `checks`: 2–5 clear bullets in the selected report language explaining in natural, business-friendly language what the agent verified and what it found (for Criterion 3 when failing, include the explicit breakdown per issue type: `Story`, `Task`, `Sub-task`, others). Never include raw field names (`customfield_10000`, `customfield_10021`, `dev-status`, `dev-info`) or cryptic shorthand (`Closed=46 | No-Closed=106`).
      - optional `evidence` (only clear, meaningful references such as the Jira sprint query or Confluence retro URL — never dump cryptic pipe-separated internal tallies like `Closed=46 | No-Closed=106 | Deferred (>185): 76`), `issues` (affected keys — for Criterion 6, always include 100% of affected keys matching the counts in `note`/`checks`).
-  2. `{ "id": "issues", "type": "issue-table", "jql": "<query used>" }` — **all** sprint issues with `key`, `type`, `summary`, `status`, `resolution` (Jira resolution name, e.g. `"Done"`, `"Won't Do"`, `"Duplicate"`, or `"Sin resolución"` when null), `assignee` (always request these fields; never leave summary/resolution/assignee out), `status_category` (`pass` for `Closed`, `info` for `Resolved`/`Verified` or tasks deferred to a future sprint/backlog, `fail` only for active/unfinished tasks stuck in closed sprints without rollover or Stories closed by non-PO/PO Proxy), and `flags` (plain, self-explanatory Spanish tags, e.g. `"Postergada al Sprint 186"`, `"Pendiente de cierre formal (Criterio 3)"`, `"Cerrada por <nombre> (no es PO ni PO Proxy)"`, `"Sin pase a próximo sprint ni devolución al backlog"`, `"Tiene PR abierto"`, `"Sin Pull Request vinculado"` — never use opaque codes like `"sin rollover ni backlog"` or `"no-pr"`).
+  2. `{ "id": "issues", "type": "issue-table", "jql": "<query used>" }` — **all** sprint issues with `key`, `type`, `summary`, `status`, `resolution` (Jira resolution name, e.g. `"Done"`, `"Won't Do"`, `"Duplicate"`, or `"Unresolved"` / `"Sin resolución"` when null), `assignee` (always request these fields; never leave summary/resolution/assignee out), `status_category` (`pass` for `Closed`, `info` for `Resolved`/`Verified` or tasks deferred to a future sprint/backlog, `fail` only for active/unfinished tasks stuck in closed sprints without rollover or Stories closed by non-PO/PO Proxy), and `flags` (plain, self-explanatory tags in the selected report language, e.g. `en`: `"Deferred to Sprint 186"`, `"Pending formal closure (Criterion 3)"`, `"Closed by <name> (not PO or PO Proxy)"`, `"Not moved to next sprint or backlog"`, `"Open PR"`, `"No Pull Request linked"` / `es`: `"Postergada al Sprint 186"`, `"Pendiente de cierre formal (Criterio 3)"`, `"Cerrada por <nombre> (no es PO ni PO Proxy)"`, `"Sin pase a próximo sprint ni devolución al backlog"`, `"Tiene PR abierto"`, `"Sin Pull Request vinculado"`).
   3. `{ "id": "status-distribution", "type": "distribution" }` — count per Jira status (all statuses, so the total equals the number of issues).
-- `actions`: from Step 5 (`id`, `group`, `criterion`, `text`, optional `issues`).
-- `limitations`: only what really could not be verified in this run and why, in plain Spanish (one line each). Do not repeat what is already in `notices`.
+- `actions`: from Step 5 (`id`, `group`, `criterion`, `text`, optional `issues`), written in the selected report language (`en` default or `es`).
+- `limitations`: only what really could not be verified in this run and why, in plain text in the selected report language (one line each). Do not repeat what is already in `notices`.
 - Only Jira metadata: never descriptions, comments, or attachments.
 - **Client-value writing standard (mandatory across the entire report)**:
-  - Every sentence, bullet, flag, and action must provide real, actionable value for a non-technical PO, PM, or client stakeholder.
+  - Every sentence, bullet, flag, and action must provide real, actionable value for a non-technical PO, PM, or client stakeholder, written consistently in the selected report language (`en` default or `es`).
   - Eliminate raw field IDs (`customfield_10000`, `customfield_10021`), internal API names (`dev-status`, `dev-info`, `changelog`), opaque pipe-delimited summaries (`Closed=46 | No-Closed=106`), and abbreviated technical codes.
-  - The **"Qué verificó el agente" (`checks`)** section must read naturally in plain Spanish while preserving exact, auditable numbers and facts.
+  - The **"What the agent checked" / "Qué verificó el agente" (`checks`)** section must read naturally in plain language while preserving exact, auditable numbers and facts.
 
 ---
 
@@ -218,12 +234,12 @@ python .claude/skills/genesis-report-renderer/scripts/build_report.py reports/sp
 
 # Step 8 — Chat Reply (Concise) & Execution Time
 
-Reply briefly — do not repeat the report:
-- Overall status (🟢 DONE / 🟡 Pendiente / 🔴 No completo) and one line per DoD item (emoji + short label). If Criterion 4 passed with deferred tasks, note it: `"🟢 Lo que no se terminó se movió de sprint (Cumple con aviso: X tareas postergadas al Sprint Y)"`.
+Reply briefly in the selected report language (`en` default or `es`) — do not repeat the report:
+- Overall status (`en`: 🟢 DONE / 🟡 Pending / 🔴 Not complete · `es`: 🟢 DONE / 🟡 Pendiente / 🔴 No completo) and one line per DoD item (emoji + short label). If Criterion 4 passed with deferred tasks, note it (e.g. `"🟢 Unfinished work moved out of the sprint (Pass with notice: X tasks deferred to Sprint Y)"`).
 - **Execution time**: visibly show the end-to-end total time printed by `build_report.py` (`agent execution: ...`):
-  `⏱️ **Tiempo total de ejecución:** <total>`
+  `⏱️ **Total execution time:** <total>` (or `⏱️ **Tiempo total de ejecución:** <total>` in Spanish)
 - Links to `report.html` and `report-data.json`.
-- How many actions remain (manual + fix) to reach DONE. Mention the `practice` suggestions separately, as optional, without counting them.
+- How many actions remain (`manual` + `fix`) to reach DONE. Mention the `practice` suggestions separately, as optional, without counting them.
 
 ---
 
